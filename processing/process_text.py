@@ -22,9 +22,11 @@ import argparse
 from collections import Counter
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "dictionary.db"
-MAJKA_PATH = Path(__file__).parent / "majka"
-MAJKA_DICT = Path(__file__).parent / "majka.w-lt"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+DB_PATH = PROJECT_ROOT / "dictionary.db"
+MAJKA_PATH = PROJECT_ROOT / "majka"
+MAJKA_DICT = PROJECT_ROOT / "majka.w-lt"
 
 SYSTEM_PROMPT = """You are a Czech-English lexicographer creating dictionary entries.
 For each Czech word, produce a JSON entry with these fields:

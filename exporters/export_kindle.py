@@ -33,8 +33,10 @@ from export_stardict import (
     format_entry_html,
 )
 
-DB_PATH = Path(__file__).parent / "dictionary.db"
-DEFAULT_OUTPUT_DIR = Path(__file__).parent / "output" / "kindle"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+DB_PATH = PROJECT_ROOT / "dictionary.db"
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "output" / "kindle"
 DEFAULT_DICT_NAME = "Czech-English"
 
 # Kindle's kindlegen works best with ~10K entries per XHTML file

@@ -5,13 +5,13 @@ A comprehensive Czech-English offline dictionary with full morphological coverag
 ## Core Scripts
 
 - `build_dictionary.py` - Imports all data sources into SQLite (`dictionary.db`)
-- `export_stardict.py` - Exports database to StarDict format (`output/stardict/`)
-- `export_kindle.py` - Exports database to Kindle MOBI format (`output/kindle/`)
-- `export_yomitan.py` - Exports database to Yomitan ZIP format (`output/yomitan/`)
-- `process_text.py` - Processes Czech text files, finds missing words, generates definitions via DeepSeek
-- `process_books.py` - Batch-processes ebooks in `books/` directory
-- `process_subs.py` - Batch-processes subtitle files in `1k_sub_files/`
-- `test_dictionary.py` - Word lookup and coverage testing
+- `exporters/export_stardict.py` - Exports database to StarDict format (`output/stardict/`)
+- `exporters/export_kindle.py` - Exports database to Kindle MOBI format (`output/kindle/`)
+- `exporters/export_yomitan.py` - Exports database to Yomitan ZIP format (`output/yomitan/`)
+- `processing/process_text.py` - Processes Czech text files, finds missing words, generates definitions via DeepSeek
+- `processing/process_books.py` - Batch-processes ebooks in `books/` directory
+- `processing/process_subs.py` - Batch-processes subtitle files in `1k_sub_files/`
+- `tools/test_dictionary.py` - Word lookup and coverage testing
 
 ## Key Design Decisions
 

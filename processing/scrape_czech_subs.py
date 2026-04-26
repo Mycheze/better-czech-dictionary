@@ -36,9 +36,11 @@ import re
 from pathlib import Path
 from datetime import datetime
 
-SUBS_DIR = Path(__file__).parent / "1k_sub_files"
-SCRAPED_DIR = Path(__file__).parent / "scraped_subs"
-CHANNELS_FILE = Path(__file__).parent / "czech_channels.json"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+SUBS_DIR = PROJECT_ROOT / "1k_sub_files"
+SCRAPED_DIR = PROJECT_ROOT / "scraped_subs"
+CHANNELS_FILE = PROJECT_ROOT / "czech_channels.json"
 
 # Default list of Czech YouTube channels good for language learning
 DEFAULT_CHANNELS = [
@@ -195,7 +197,7 @@ def convert_all_vtt(source_dir=None):
 def process_subs(generate=False, min_freq=2, dry_run=False, batch_size=10, max_words=0):
     """Process all subtitle files through the dictionary pipeline."""
     # Import process_subs module
-    cmd = [sys.executable, str(Path(__file__).parent / "process_subs.py")]
+    cmd = [sys.executable, str(PROJECT_ROOT / "processing" / "process_subs.py")]
 
     if generate:
         cmd.append("--generate")
@@ -210,7 +212,7 @@ def process_subs(generate=False, min_freq=2, dry_run=False, batch_size=10, max_w
 
     # Pass through API key
     env = os.environ.copy()
-    key_file = Path(__file__).parent / "deepseek_key.txt"
+    key_file = PROJECT_ROOT / "deepseek_key.txt"
     if key_file.exists() and "DEEPSEEK_API_KEY" not in env:
         env["DEEPSEEK_API_KEY"] = key_file.read_text().strip()
 
