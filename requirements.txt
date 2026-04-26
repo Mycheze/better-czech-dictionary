@@ -1,0 +1,2 @@
+# Required only for --generate mode (LLM gap-filling via DeepSeek API)
+openai>=1.0

@@ -1,0 +1,38 @@
+# API keys and secrets
+deepseek_key.txt
+*.key
+*.secret
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Large data downloads (see README for how to obtain these)
+data/
+MorfFlex*.zip
+
+# Majka binary + dictionary (platform-specific, see README)
+majka
+majka.w-lt
+
+# Build artifacts
+dictionary.db
+output/
+
+# Books and copyrighted content
+books/
+books_corpus.txt
+
+# Subtitle files and corpora
+1k_sub_files/
+scraped_subs/
+subs_corpus.txt
+
+# Personal files
+known_words.txt
+Zaklinac*
+*_analysis.json
+
+# Claude Code local settings
+.claude/
