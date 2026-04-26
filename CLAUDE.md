@@ -6,6 +6,8 @@ A comprehensive Czech-English offline dictionary with full morphological coverag
 
 - `build_dictionary.py` - Imports all data sources into SQLite (`dictionary.db`)
 - `export_stardict.py` - Exports database to StarDict format (`output/stardict/`)
+- `export_kindle.py` - Exports database to Kindle MOBI format (`output/kindle/`)
+- `export_yomitan.py` - Exports database to Yomitan ZIP format (`output/yomitan/`)
 - `process_text.py` - Processes Czech text files, finds missing words, generates definitions via DeepSeek
 - `process_books.py` - Batch-processes ebooks in `books/` directory
 - `process_subs.py` - Batch-processes subtitle files in `1k_sub_files/`
@@ -17,7 +19,7 @@ A comprehensive Czech-English offline dictionary with full morphological coverag
 - **Morphology**: MorfFlex CZ 2.1 for inflection mapping (16.8M form-lemma pairs)
 - **Runtime lemmatizer**: Majka binary (`./majka -f ./majka.w-lt`)
 - **LLM gap-filling**: DeepSeek V3 via OpenAI-compatible API
-- **Export targets**: StarDict (KOReader/GoldenDict), Kindle MOBI (planned), Yomitan (planned)
+- **Export targets**: StarDict (KOReader/GoldenDict), Kindle MOBI (via kindlegen), Yomitan ZIP (browser extension)
 - **License**: Mixed -- MorfFlex is CC BY-NC-SA 4.0, Wiktionary is CC BY-SA, code is MIT
 
 ## Data Sources (not in repo, see README for download instructions)

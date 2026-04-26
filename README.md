@@ -2,7 +2,7 @@
 
 A comprehensive Czech-English offline dictionary with full morphological coverage. Look up **any inflected Czech word form** -- not just the base dictionary form.
 
-Built for Czech learners who read on Kindle, KOReader, or other devices with StarDict/GoldenDict support.
+Built for Czech learners who read on Kindle, KOReader, or in the browser with Yomitan.
 
 ## Why this exists
 
@@ -33,11 +33,15 @@ Download the `.zip` file containing `Czech-English.dict.dz`, `Czech-English.idx`
 - **KOReader**: `/koreader/data/dict/` or use the dictionary manager in Settings
 - **GoldenDict**: Add the directory in Edit > Dictionaries
 
-### Kindle (coming soon)
-MOBI format export is planned.
+### Kindle
+Download the MOBI file and transfer it to your Kindle. The dictionary uses Kindle's native `<idx:infl>` markup, so all inflected forms resolve to the correct entry without needing separate entries per form.
 
-### Yomitan (coming soon)
-Yomitan ZIP format export is planned.
+To sideload: connect your Kindle via USB and copy the `.mobi` file to the `documents/dictionaries/` folder. Then select it as your default Czech dictionary in Settings > Language & Dictionaries.
+
+> **Note**: Building MOBI from source requires [kindlegen](https://archive.org/details/kindlegen-2.9) (Amazon's Kindle dictionary compiler).
+
+### Yomitan (browser extension)
+Download the `.zip` file and import it directly in Yomitan (Settings > Dictionaries > Import). Works in any browser where Yomitan is installed -- hover over Czech words on any webpage to see definitions.
 
 ## Build from source
 
@@ -81,11 +85,20 @@ python3 build_dictionary.py          # Import all sources
 python3 build_dictionary.py --stats  # Check statistics
 ```
 
-### 3. Export to StarDict
+### 3. Export
 
 ```bash
+# StarDict (KOReader / GoldenDict)
 python3 export_stardict.py
 # Output: output/stardict/Czech-English.{dict.dz,idx,ifo}
+
+# Kindle MOBI (requires kindlegen)
+python3 export_kindle.py
+# Output: output/kindle/Czech-English.mobi
+
+# Yomitan (browser extension)
+python3 export_yomitan.py
+# Output: output/yomitan/Czech-English.zip
 ```
 
 ### 4. (Optional) Expand coverage with your own texts
@@ -110,7 +123,9 @@ python3 export_stardict.py
 
 ```
 build_dictionary.py    - Import data sources into SQLite database
-export_stardict.py     - Export database to StarDict format
+export_stardict.py     - Export to StarDict format (KOReader / GoldenDict)
+export_kindle.py       - Export to Kindle MOBI format
+export_yomitan.py      - Export to Yomitan format (browser extension)
 process_text.py        - Process Czech text, find gaps, generate definitions
 process_books.py       - Batch-process ebook files
 process_subs.py        - Batch-process subtitle files
@@ -126,7 +141,7 @@ sentence_coverage.py   - Sentence-level coverage analysis
 1. **Import** definitions from Wiktionary (via kaikki.org) and Svobodne Slovniky into a SQLite database
 2. **Import** 16.8M inflection mappings from MorfFlex CZ 2.1, linking every word form to its lemma
 3. **Gap-fill** by processing real Czech texts (books, subtitles) to find missing words, then generating definitions via LLM
-4. **Export** to StarDict with one entry per inflected form, so any word you tap on resolves to a definition
+4. **Export** to multiple formats (StarDict, Kindle MOBI, Yomitan), each using the optimal strategy for that platform
 
 The cross-reference resolver handles Wiktionary entries like "inflection of X" by inlining the actual definition from X, so you get real definitions instead of grammatical labels.
 
