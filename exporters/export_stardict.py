@@ -21,8 +21,10 @@ import html
 from pathlib import Path
 from collections import defaultdict
 
-DB_PATH = Path(__file__).parent / "dictionary.db"
-DEFAULT_OUTPUT_DIR = Path(__file__).parent / "output" / "stardict"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+DB_PATH = PROJECT_ROOT / "dictionary.db"
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "output" / "stardict"
 DEFAULT_DICT_NAME = "Czech-English"
 
 

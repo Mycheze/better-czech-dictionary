@@ -15,7 +15,9 @@ import json
 from collections import Counter
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "dictionary.db"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+DB_PATH = PROJECT_ROOT / "dictionary.db"
 
 
 def lookup_word(conn, word):
@@ -171,8 +173,8 @@ def test_coverage(conn, text_file):
         print(f"{i:<6} {word:<25} {word_freq[word]:<8}")
 
     # Also try with Majka lemmatization
-    majka_path = Path(__file__).parent / "majka"
-    majka_dict = Path(__file__).parent / "majka.w-lt"
+    majka_path = PROJECT_ROOT / "majka"
+    majka_dict = PROJECT_ROOT / "majka.w-lt"
     if majka_path.exists() and majka_dict.exists():
         print(f"\n{'='*60}")
         print(f"COVERAGE WITH MAJKA LEMMATIZATION")

@@ -26,9 +26,11 @@ import tempfile
 from collections import Counter
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "dictionary.db"
-BOOKS_DIR = Path(__file__).parent / "books"
-DATA_DIR = Path(__file__).parent / "data"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+DB_PATH = PROJECT_ROOT / "dictionary.db"
+BOOKS_DIR = PROJECT_ROOT / "books"
+DATA_DIR = PROJECT_ROOT / "data"
 
 # Import shared logic from process_text
 from process_text import (
@@ -162,7 +164,7 @@ def main():
     print(f"Combined corpus: {len(combined_text):,} characters")
 
     # Save combined corpus for reference
-    corpus_path = Path(__file__).parent / "books_corpus.txt"
+    corpus_path = PROJECT_ROOT / "books_corpus.txt"
     with open(corpus_path, 'w', encoding='utf-8') as f_out:
         f_out.write(combined_text)
     print(f"Saved combined corpus to: {corpus_path}")
@@ -250,7 +252,7 @@ def main():
     if args.generate or args.dry_run:
         api_key = os.environ.get("DEEPSEEK_API_KEY", "")
         if not api_key:
-            key_file = Path(__file__).parent / "deepseek_key.txt"
+            key_file = PROJECT_ROOT / "deepseek_key.txt"
             if key_file.exists():
                 api_key = key_file.read_text().strip()
 

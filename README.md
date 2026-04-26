@@ -89,15 +89,15 @@ python3 build_dictionary.py --stats  # Check statistics
 
 ```bash
 # StarDict (KOReader / GoldenDict)
-python3 export_stardict.py
+python3 exporters/export_stardict.py
 # Output: output/stardict/Czech-English.{dict.dz,idx,ifo}
 
 # Kindle MOBI (requires kindlegen)
-python3 export_kindle.py
+python3 exporters/export_kindle.py
 # Output: output/kindle/Czech-English.mobi
 
 # Yomitan (browser extension)
-python3 export_yomitan.py
+python3 exporters/export_yomitan.py
 # Output: output/yomitan/Czech-English.zip
 ```
 
@@ -110,30 +110,38 @@ pip install openai
 export DEEPSEEK_API_KEY="your-key-here"
 
 # Process a single text file
-python3 process_text.py my_book.txt --generate
+python3 processing/process_text.py my_book.txt --generate
 
 # Process all ebooks in books/ directory
-python3 process_books.py --generate --reimport-morfflex
+python3 processing/process_books.py --generate --reimport-morfflex
 
 # Re-export after adding new entries
-python3 export_stardict.py
+python3 exporters/export_stardict.py
 ```
 
 ## Project structure
 
 ```
-build_dictionary.py    - Import data sources into SQLite database
-export_stardict.py     - Export to StarDict format (KOReader / GoldenDict)
-export_kindle.py       - Export to Kindle MOBI format
-export_yomitan.py      - Export to Yomitan format (browser extension)
-process_text.py        - Process Czech text, find gaps, generate definitions
-process_books.py       - Batch-process ebook files
-process_subs.py        - Batch-process subtitle files
-scrape_czech_subs.py   - Scrape Czech YouTube subtitles
-test_dictionary.py     - Look up words and test coverage
-parse_cs_txt.py        - Czech text tokenizer / frequency analyzer
-known_analyzer.py      - Vocabulary coverage analyzer
-sentence_coverage.py   - Sentence-level coverage analysis
+build_dictionary.py          - Import data sources into SQLite database
+exporters/
+    export_stardict.py       - Export to StarDict format (KOReader / GoldenDict)
+    export_kindle.py         - Export to Kindle MOBI format
+    export_yomitan.py        - Export to Yomitan format (browser extension)
+processing/
+    process_text.py          - Process Czech text, find gaps, generate definitions
+    process_books.py         - Batch-process ebook files
+    process_subs.py          - Batch-process subtitle files
+    scrape_czech_subs.py     - Scrape Czech YouTube subtitles
+tools/
+    test_dictionary.py       - Look up words and test coverage
+    parse_cs_txt.py          - Czech text tokenizer / frequency analyzer
+    known_analyzer.py        - Vocabulary coverage analyzer
+    sentence_coverage.py     - Sentence-level coverage analysis
+docs/
+    ARCHITECTURE.md          - Technical design and schema
+    PIPELINE.md              - Text processing pipeline design
+    PLAN.md                  - Implementation plan
+    RESEARCH.md              - Data source research
 ```
 
 ## How it works
