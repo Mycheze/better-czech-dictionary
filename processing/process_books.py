@@ -40,8 +40,11 @@ from process_text import (
 )
 
 
-def extract_text_from_epub(filepath):
-    """Extract plain text from epub using calibre's ebook-convert."""
+EBOOK_EXTENSIONS = ('.epub', '.mobi', '.azw3', '.azw', '.fb2', '.lit', '.pdb', '.pdf')
+
+
+def extract_text_from_ebook(filepath):
+    """Extract plain text from any ebook format supported by calibre."""
     with tempfile.NamedTemporaryFile(suffix='.txt', delete=False) as tmp:
         tmp_path = tmp.name
     try:
@@ -65,6 +68,10 @@ def extract_text_from_epub(filepath):
     finally:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
+
+
+# Backwards-compatibility alias for older callers.
+extract_text_from_epub = extract_text_from_ebook
 
 
 def is_likely_czech(word, pos_map):
@@ -103,6 +110,9 @@ def is_likely_czech(word, pos_map):
 
 def reimport_morfflex_for_lemmas(conn, new_lemmas):
     """Re-import MorfFlex inflections for newly added lemmas."""
+    # build_dictionary.py lives at the project root, not inside processing/.
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
     from build_dictionary import import_morfflex
 
     # Find the MorfFlex file
@@ -140,21 +150,24 @@ def main():
         print(f"ERROR: Directory not found: {books_dir}")
         sys.exit(1)
 
-    # Collect all epub files
-    epub_files = sorted(books_dir.glob("*.epub"))
-    print(f"Found {len(epub_files)} epub files in {books_dir}")
+    # Collect all ebook files (epub, mobi, azw3, ...)
+    ebook_files = sorted(
+        f for f in books_dir.iterdir()
+        if f.is_file() and f.suffix.lower() in EBOOK_EXTENSIONS
+    )
+    print(f"Found {len(ebook_files)} ebook files in {books_dir}")
 
-    if not epub_files:
-        print("No .epub files found.")
+    if not ebook_files:
+        print(f"No ebook files found. Supported extensions: {', '.join(EBOOK_EXTENSIONS)}")
         sys.exit(1)
 
     # Extract text from each book
     print("Extracting text from ebooks...")
     all_text_parts = []
     file_count = 0
-    for f in epub_files:
+    for f in ebook_files:
         print(f"  Extracting: {f.name}...")
-        text = extract_text_from_epub(f)
+        text = extract_text_from_ebook(f)
         if text.strip():
             all_text_parts.append(text)
             file_count += 1

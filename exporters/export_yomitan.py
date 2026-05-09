@@ -66,13 +66,13 @@ def format_structured_content(entry_data, is_inflection=False, lemma_ref=None):
     """
     definitions = []
 
-    # If this is an inflection entry, add a reference to the lemma
+    # If this is an inflection entry, add a reference to the lemma using the
+    # same bold-headword + colon style used elsewhere (see export_stardict).
     if is_inflection and lemma_ref:
         definitions.append({
             "type": "structured-content",
             "content": [
-                {"tag": "span", "style": {"fontSize": "85%", "color": "#888"}, "content": "\u2192 "},
-                {"tag": "b", "content": lemma_ref},
+                {"tag": "span", "style": {"fontWeight": "bold"}, "content": lemma_ref},
             ]
         })
 
@@ -95,7 +95,7 @@ def format_structured_content(entry_data, is_inflection=False, lemma_ref=None):
             cs = ex.get("cs", "")
             en = ex.get("en", "")
             if cs:
-                ex_parts = [{"tag": "i", "content": cs}]
+                ex_parts = [{"tag": "span", "style": {"fontStyle": "italic"}, "content": cs}]
                 if en:
                     ex_parts.append(f" \u2014 {en}")
                 content.append({"tag": "div", "style": {"fontSize": "85%", "color": "#555"}, "content": ex_parts})
@@ -128,15 +128,21 @@ def format_structured_content(entry_data, is_inflection=False, lemma_ref=None):
 
 
 def build_compact_definition(entry_data, lemma_ref):
-    """Build a compact definition for an inflected form entry."""
+    """Build a compact definition for an inflected form entry.
+
+    Format: bold lemma + colon + first definition. Matches the StarDict
+    inflection compact format so every redirected lookup (inflection forms
+    AND cross-reference lemmas) renders identically.
+    """
     senses = entry_data.get("senses", [])
     first_def = senses[0].get("definition_en", "") if senses else ""
     if not first_def:
-        return [f"\u2192 {lemma_ref}"]
+        return [{"type": "structured-content",
+                 "content": [{"tag": "span", "style": {"fontWeight": "bold"}, "content": lemma_ref}]}]
 
     content = [
-        {"tag": "span", "style": {"fontSize": "85%", "color": "#888"}, "content": f"\u2192 {lemma_ref}: "},
-        first_def,
+        {"tag": "span", "style": {"fontWeight": "bold"}, "content": lemma_ref},
+        f": {first_def}",
     ]
     return [{"type": "structured-content", "content": content}]
 
@@ -269,9 +275,13 @@ def export_yomitan(db_path=DB_PATH, output_dir=DEFAULT_OUTPUT_DIR, dict_name=DEF
         if form in lemma_words:
             continue
 
-        # Build compact definition from all possible lemmas
+        # Build compact definition from all possible lemmas. Dedupe on
+        # (target_lemma, first_def) so that multiple source lemmas which all
+        # resolve to the same target (e.g. "mladá" and "mladé" both being
+        # cross-references to "mladý") don't produce duplicate lines.
         definitions = []
         seen_lemmas = set()
+        seen_target_keys = set()
         for lemma, pos in lemma_list:
             if lemma in seen_lemmas:
                 continue
@@ -287,7 +297,16 @@ def export_yomitan(db_path=DB_PATH, output_dir=DEFAULT_OUTPUT_DIR, dict_name=DEF
                         break
 
             if entry_data:
-                definitions.extend(build_compact_definition(entry_data, lemma))
+                # Display the resolved target lemma (post-cross-reference) so
+                # the bolded headword always points at the canonical lemma.
+                display_lemma = entry_data.get("lemma", lemma)
+                senses = entry_data.get("senses") or []
+                first_def = senses[0].get("definition_en", "") if senses else ""
+                target_key = (display_lemma, first_def)
+                if target_key in seen_target_keys:
+                    continue
+                seen_target_keys.add(target_key)
+                definitions.extend(build_compact_definition(entry_data, display_lemma))
 
         if definitions:
             sequence += 1
