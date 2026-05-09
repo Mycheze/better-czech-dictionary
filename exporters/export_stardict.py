@@ -32,15 +32,29 @@ DEFAULT_DICT_NAME = "Czech-English"
 # Cross-reference detection and resolution
 # ---------------------------------------------------------------------------
 
-# Keywords that indicate a definition is a cross-reference, not a real definition
+# Keywords that indicate a definition is a cross-reference, not a real definition.
+# Add new tokens here when you spot unresolved "X of LEMMA" patterns in the data.
 _XREF_KEYWORDS = {
-    "inflection", "form", "plural", "singular", "diminutive", "augmentative",
-    "abbreviation", "clipping", "participle", "imperative", "transgressive",
-    "present", "conditional", "possessive", "accusative", "genitive", "dative",
-    "nominative", "vocative", "instrumental", "locative", "feminine", "masculine",
-    "neuter", "animate", "inanimate", "imperfective", "perfective", "comparative",
-    "superlative", "alternative", "obsolete", "archaic", "dated", "short",
-    "verbal", "noun", "past", "active", "passive", "degree", "spelling",
+    # structural tokens
+    "inflection", "form", "spelling", "degree",
+    # number / case
+    "plural", "singular", "accusative", "genitive", "dative",
+    "nominative", "vocative", "instrumental", "locative",
+    # gender / animacy
+    "feminine", "masculine", "neuter", "animate", "inanimate", "virile", "nonvirile",
+    # derivations / register
+    "diminutive", "augmentative", "abbreviation", "clipping", "alternative",
+    "obsolete", "archaic", "dated", "short", "combined", "compound",
+    # verb forms
+    "participle", "imperative", "transgressive", "present", "conditional",
+    "future", "past", "indicative", "subjunctive", "infinitive", "gerund",
+    "active", "passive", "verbal", "imperfective", "perfective",
+    # person (e.g. "first-person", "third-person")
+    "first", "second", "third", "person",
+    # adjective grades / pronouns
+    "comparative", "superlative", "possessive", "clitic",
+    # part-of-speech tokens that sometimes appear in prefixes
+    "noun",
 }
 
 _XREF_RE = re.compile(
@@ -61,11 +75,33 @@ def is_crossref_sense(definition_en):
     return prefix_words.issubset(_XREF_KEYWORDS)
 
 
+_QUOTE_CHARS = '"\'“”‘’'
+_SEP_RE = re.compile(r'\s*([;:,/(])\s*')
+
+
+def _is_grammatical_only(text):
+    """Return True if a text fragment consists only of grammatical/relationship tokens."""
+    if not text:
+        return True
+    words = set(re.split(r'[\s/,;\-:]+', text.lower()))
+    return words.issubset(_XREF_KEYWORDS | {"", "of", "the", "a", "an"})
+
+
 def parse_crossref(definition_en):
     """Parse a cross-reference definition.
 
     Returns (relationship_type, target_lemma, embedded_definition).
-    embedded_definition is None if there's no inline definition after the target.
+    embedded_definition is None if there's no inline gloss after the target.
+
+    Handles a wide variety of patterns observed in Wiktionary data:
+        "ruka"                                      -> target='ruka'
+        "ruka: small hand (body part)"              -> target='ruka', embedded='small hand (body part)'
+        "absint (\"absinthe\")"                     -> target='absint', embedded='absinthe'
+        "zvonek (“small bell; doorbell”)" -> target='zvonek', embedded='small bell; doorbell'
+        "liška, fox"                                -> target='liška', embedded='fox'
+        "kabela / kabele"                           -> target='kabela' (drops alternate forms)
+        "absurdita:; nominative plural"             -> target='absurdita', embedded=None
+        "ten: it, this, that"                       -> target='ten', embedded='it, this, that'
     """
     m = _XREF_RE.match(definition_en)
     if not m:
@@ -79,58 +115,57 @@ def parse_crossref(definition_en):
         rel = "dim."
     elif "augmentative" in prefix:
         rel = "aug."
-    elif "comparative" in prefix or "superlative" in prefix:
-        rel = "comp." if "comparative" in prefix else "sup."
-    elif "alternative" in prefix or "obsolete" in prefix or "archaic" in prefix or "dated" in prefix or "spelling" in prefix:
+    elif "superlative" in prefix:
+        rel = "sup."
+    elif "comparative" in prefix:
+        rel = "comp."
+    elif any(k in prefix for k in ("alternative", "obsolete", "archaic", "dated", "spelling")):
         rel = "="
-    elif "abbreviation" in prefix or "clipping" in prefix:
+    elif any(k in prefix for k in ("abbreviation", "clipping")):
         rel = "abbr."
     elif "imperfective" in prefix or "perfective" in prefix:
         rel = "asp."
     else:
         rel = None  # plain inflection, no tag needed
 
-    # Parse target lemma and embedded definition from remainder
-    # Patterns:
-    #   "absurdita:; nominative/accusative..."  -> target="absurdita", embedded=None
-    #   "hrad; small castle"                    -> target="hrad", embedded="small castle"
-    #   "absint ("absinthe")"                   -> target="absint", embedded="absinthe"
-    #   "nízký; lower"                          -> target="nízký", embedded="lower"
-
-    # Strip trailing colon (common in "inflection of X:" patterns)
+    # Find the first separator that breaks the target from any embedded gloss
+    # or alternate. Separators (in order of priority): ; , : / (
+    sep_match = _SEP_RE.search(remainder)
     embedded = None
-    target = remainder
 
-    # Handle semicolon: text after semicolon may be embedded definition or grammatical info
-    if ";" in target:
-        before_semi, after_semi = target.split(";", 1)
-        after_semi = after_semi.strip()
-        # If the part after semicolon looks like grammatical info, ignore it
-        after_words = set(re.split(r'[\s/,-]+', after_semi.lower()))
-        if not after_words.issubset(_XREF_KEYWORDS | {"", "of", "the", "a", "an"}):
-            embedded = after_semi
-        target = before_semi.strip()
+    if sep_match:
+        target = remainder[:sep_match.start()].strip()
+        sep_char = sep_match.group(1)
+        rest = remainder[sep_match.end():]
 
-    # Handle parenthetical: "absint ("absinthe")" or "zase ("again")"
-    paren_match = re.match(r'^(.+?)\s*\("?([^"]+?)"?\)\s*$', target)
-    if paren_match:
-        target = paren_match.group(1).strip()
-        if not embedded:
-            embedded = paren_match.group(2).strip()
+        if sep_char == "/":
+            # "kabela / kabele" — alternate forms; keep first, drop the rest.
+            pass
+        elif sep_char == "(":
+            # Parenthetical embedded gloss.
+            inner_match = re.match(r'(.*?)\)\s*(.*)$', rest, re.DOTALL)
+            if inner_match:
+                inner = inner_match.group(1).strip().strip(_QUOTE_CHARS)
+                tail = inner_match.group(2).strip()
+                if inner and not _is_grammatical_only(inner):
+                    embedded = inner
+                if tail:
+                    tail = tail.lstrip(" :;,").rstrip(" .")
+                    if tail and not _is_grammatical_only(tail):
+                        embedded = (embedded + "; " + tail) if embedded else tail
+            else:
+                inner = rest.rstrip(")").strip().strip(_QUOTE_CHARS)
+                if inner and not _is_grammatical_only(inner):
+                    embedded = inner
+        else:
+            # ";" ":" or "," — text after may be an embedded gloss or grammatical info.
+            rest_clean = rest.lstrip(" ;:,").rstrip(" .;:,").strip()
+            if rest_clean and not _is_grammatical_only(rest_clean):
+                embedded = rest_clean
+    else:
+        target = remainder
 
-    # Handle colon separator: "ten: it, this, that" -> target="ten", embedded="it, this, that"
-    if ":" in target and not embedded:
-        before_colon, after_colon = target.split(":", 1)
-        after_colon = after_colon.strip()
-        if after_colon and not re.match(r'^[\s;,]*$', after_colon):
-            # Looks like an embedded definition after the colon
-            after_words = set(re.split(r'[\s/,-]+', after_colon.lower()))
-            if not after_words.issubset(_XREF_KEYWORDS | {"", "of", "the", "a", "an"}):
-                embedded = after_colon
-                target = before_colon.strip()
-
-    # Clean target: strip trailing colon, quotes, whitespace
-    target = target.rstrip(":").strip().strip('"').strip("'").lower()
+    target = target.rstrip(":;,. ").strip().strip(_QUOTE_CHARS).lower()
 
     return rel, target, embedded
 
@@ -150,6 +185,13 @@ def classify_entry_senses(entry_data):
 
 def resolve_crossref_entry(entry_data, entries_by_lemma):
     """Resolve a cross-reference-only entry to the target's real definition.
+
+    The output uses the same visual format as inflection redirects: the target
+    lemma is shown bolded as the headword, followed by the resolved senses
+    (rendered through ``format_entry_html`` so POS/gender/aspect/examples are
+    preserved). This keeps every redirected lookup visually consistent — both
+    inflection forms and cross-reference lemmas appear with a bolded target
+    headword and no separate arrow indicator.
 
     Returns (resolved_html, resolved_compact) or (None, None) if unresolvable.
     entries_by_lemma: dict mapping lowercase lemma -> list of parsed entry_json dicts
@@ -180,53 +222,34 @@ def resolve_crossref_entry(entry_data, entries_by_lemma):
         if target_entry:
             real_senses, _ = classify_entry_senses(target_entry)
             if real_senses:
-                # Build resolved entry: use target's real senses
-                resolved = dict(entry_data)
+                target_display = target_entry.get("lemma", target)
+                # Build a resolved entry that inherits the target's headword
+                # and metadata, with the target's real senses (or the embedded
+                # gloss if one was attached to the cross-reference).
+                resolved = dict(target_entry)
+                resolved["lemma"] = target_display
                 if embedded:
-                    # Use embedded def as primary, target senses as context
                     resolved["senses"] = [{"definition_en": embedded}] + real_senses
                 else:
                     resolved["senses"] = real_senses
 
-                # Build HTML with relationship indicator
-                target_display = target_entry.get("lemma", target)
-                tag = f"<small>({rel} {html.escape(target_display)})</small> " if rel else ""
-                prefix = f"<small>→ {html.escape(target_display)}</small><br>"
-
-                resolved_html = prefix + tag + _format_senses_html(real_senses, embedded)
+                resolved_html = format_entry_html(
+                    resolved, target_display, target_entry.get("pos", "")
+                )
                 first_def = embedded or real_senses[0].get("definition_en", "")
-                resolved_compact = f"<b>{html.escape(target_display)}</b>: {html.escape(first_def)}"
+                resolved_compact = (
+                    f"<b>{html.escape(target_display)}</b>: {html.escape(first_def)}"
+                )
                 return resolved_html, resolved_compact
 
         elif embedded:
-            # No target found, but we have an embedded definition
+            # No target found, but we have an embedded definition; render the
+            # embedded gloss as a minimal definition without an arrow prefix.
             resolved_html = html.escape(embedded)
             resolved_compact = html.escape(embedded)
             return resolved_html, resolved_compact
 
     return None, None
-
-
-def _format_senses_html(senses, embedded=None):
-    """Format a list of senses as HTML (lightweight version for resolved entries)."""
-    parts = []
-    if embedded:
-        parts.append(html.escape(embedded))
-
-    display_senses = senses
-    if len(display_senses) == 1:
-        defn = display_senses[0].get("definition_en", "")
-        if not embedded or defn != embedded:
-            parts.append(html.escape(defn))
-    else:
-        for i, s in enumerate(display_senses[:3], 1):
-            defn = s.get("definition_en", "")
-            if embedded and defn == embedded:
-                continue
-            register = s.get("register", "")
-            reg_str = f"[{register}] " if register and register != "neutral" else ""
-            parts.append(f"{i}. {reg_str}{html.escape(defn)}")
-    return "<br>".join(parts)
 
 
 def format_entry_html(entry_json, lemma, pos):
@@ -305,11 +328,6 @@ def format_entry_html(entry_json, lemma, pos):
         parts.append(f"<small>Note: {html.escape(notes)}</small>")
 
     return "<br>".join(parts)
-
-
-def format_inflection_html(lemma, pos, form, entry_html):
-    """Format an inflection entry that redirects to the lemma."""
-    return f"<small>→ <b>{html.escape(lemma)}</b></small><br>{entry_html}"
 
 
 def export_stardict(db_path=DB_PATH, output_dir=DEFAULT_OUTPUT_DIR, dict_name=DEFAULT_DICT_NAME):
@@ -410,23 +428,28 @@ def export_stardict(db_path=DB_PATH, output_dir=DEFAULT_OUTPUT_DIR, dict_name=DE
         inflection_groups[infl["form"]].append((infl["lemma"], infl["pos"]))
 
     for form, lemma_list in inflection_groups.items():
-        # Build COMPACT definition for inflected forms
+        # Build COMPACT definition for inflected forms.
+        # Dedupe on the rendered compact string so that multiple source lemmas
+        # which all resolve to the same target lemma (e.g. "mladá" and "mladé"
+        # both being cross-references to "mladý") don't produce duplicate lines.
         parts = []
         seen_lemmas = set()
+        seen_compact = set()
         for lemma, pos in lemma_list:
             if lemma in seen_lemmas:
                 continue
             seen_lemmas.add(lemma)
             key = (lemma, pos)
-            if key in lemma_compact:
-                parts.append(lemma_compact[key])
-            else:
+            compact = lemma_compact.get(key)
+            if compact is None:
                 # Try any POS for this lemma
-                alt_keys = lemma_by_name.get(lemma, [])
-                for alt_key in alt_keys:
+                for alt_key in lemma_by_name.get(lemma, []):
                     if alt_key in lemma_compact:
-                        parts.append(lemma_compact[alt_key])
+                        compact = lemma_compact[alt_key]
                         break
+            if compact and compact not in seen_compact:
+                seen_compact.add(compact)
+                parts.append(compact)
 
         if parts:
             final_html = "<br>".join(parts)
