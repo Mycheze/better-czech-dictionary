@@ -9,7 +9,8 @@ __pycache__/
 .venv/
 
 # Large data downloads (see README for how to obtain these)
-data/
+data/*
+!data/youtube_channels.tsv
 MorfFlex*.zip
 
 # Majka binary + dictionary (platform-specific, see README)
@@ -29,6 +30,10 @@ books_corpus.txt
 scraped_subs/
 subs_corpus.txt
 
+# YouTube corpus: thousands of downloaded subtitle files + derived artifacts.
+# The curated channel list (data/youtube_channels.tsv) IS tracked -- see README.
+youtube_corpus/
+
 # Personal files
 known_words.txt
 Zaklinac*
@@ -36,3 +41,6 @@ Zaklinac*
 
 # Claude Code local settings
 .claude/
+
+# Database backups
+*.bak

@@ -119,6 +119,68 @@ python3 processing/process_books.py --generate --reimport-morfflex
 python3 exporters/export_stardict.py
 ```
 
+### 5. (Optional) Expand coverage with the YouTube corpus
+
+To cover casual internet Czech, the pipeline can harvest subtitles from a wide
+set of Czech YouTube channels and fold the vocabulary into the dictionary. The
+curated channel list lives in `data/youtube_channels.tsv` (100 channels balanced
+across vlogs, gaming, travel, news, food, tech, history and learner content);
+downloaded subtitles land in `youtube_corpus/`, which is gitignored.
+
+```bash
+pip install yt-dlp openai
+
+# 1. Download subtitles (100 videos/channel, resumable, ~1.5 h with 5 workers)
+python3 processing/download_yt_subs.py --workers 5
+python3 processing/download_yt_subs.py --status        # progress summary
+python3 processing/download_yt_subs.py --retry-failed  # re-attempt failures
+
+# 2. Parse subtitles into a corpus + word statistics
+python3 processing/build_yt_corpus.py
+
+# 3. Inspect the coverage gap without spending anything
+python3 processing/process_yt_corpus.py --report
+
+# 4a. Screen and generate through the DeepSeek API
+python3 processing/process_yt_corpus.py --screen --generate
+
+# 4b. ...or hand the same work to a swarm of Claude agents
+python3 processing/dump_yt_candidates.py          # candidates + contexts
+python3 processing/yt_swarm.py shard-screen       # -> shards to classify
+#   run one agent per shard, writing shard_NNN.out.json
+python3 processing/yt_swarm.py merge-screen
+python3 processing/yt_swarm.py shard-gen          # -> shards to write entries for
+#   run one agent per shard (see shards/gen/INSTRUCTIONS.md)
+python3 processing/yt_swarm.py merge-gen
+python3 processing/apply_yt_results.py            # write to DB + measure
+```
+
+Both paths write to the same two caches (`screen_results.json`,
+`generated_entries.json`), so they are interchangeable and resumable. The swarm
+path exists because reasoning-model APIs charge for hidden reasoning tokens,
+which dominated the cost of screening ~20k words.
+
+Two details make this work on auto-generated captions:
+
+- **Only genuinely Czech videos are used.** YouTube auto-translates captions
+  into ~150 languages, so a `cs` caption track on an English video is machine
+  translation, not Czech speech. The downloader passes
+  `--match-filters "language ~= '^cs'"` so only videos whose original audio is
+  Czech are kept.
+- **Captions are read as `json3`, not VTT.** YouTube's auto-caption VTT repeats
+  the previous line in every cue; scraping it naively inflates word counts about
+  3x and corrupts the frequency statistics the filters depend on.
+
+Noise is removed in layers, cheapest first (see `processing/yt_word_filter.py`):
+Czech orthography rules, then **cross-channel dispersion** (a real word appears
+across many unrelated channels; ASR garbage and in-jokes stay local), then a
+capitalization test for proper nouns, then a DeepSeek screening pass that sorts
+survivors into real word / proper noun / foreign / ASR error.
+
+Confirmed colloquial forms are linked to their standard headword rather than
+given their own entry, so `cejtím` resolves to `cítit` and `tohodle` to `tenhle`
+without duplicating the dictionary.
+
 ## Project structure
 
 ```
@@ -132,8 +194,16 @@ processing/
     process_books.py         - Batch-process ebook files
     process_subs.py          - Batch-process subtitle files
     scrape_czech_subs.py     - Scrape Czech YouTube subtitles
+    download_yt_subs.py      - Download subs for the curated channel list
+    build_yt_corpus.py       - Parse subs into corpus + word/dispersion stats
+    yt_word_filter.py        - Orthography filters + screening prompt
+    dump_yt_candidates.py    - Dump candidate words with contexts
+    process_yt_corpus.py     - Screen + generate via the DeepSeek API
+    yt_swarm.py              - Shard/merge the same work for agent workers
+    apply_yt_results.py      - Write screened/generated results to the DB
 tools/
     test_dictionary.py       - Look up words and test coverage
+    build_channel_list.py    - Rebuild data/youtube_channels.tsv from the sheet
     parse_cs_txt.py          - Czech text tokenizer / frequency analyzer
     known_analyzer.py        - Vocabulary coverage analyzer
     sentence_coverage.py     - Sentence-level coverage analysis
