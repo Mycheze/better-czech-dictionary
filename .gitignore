@@ -44,3 +44,6 @@ Zaklinac*
 
 # Database backups
 *.bak
+
+# TV-show subtitle run artifacts (candidates/screen/entries JSON)
+show_subs_cache/

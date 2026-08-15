@@ -10,8 +10,8 @@ Most Czech-English dictionaries only let you look up the base form (lemma) of a 
 
 ## What's inside
 
-- **141,000+ lemmas** with English definitions
-- **16.8 million inflection mappings** (via MorfFlex CZ 2.1) so every word form resolves to its definition
+- **153,000+ lemmas** with English definitions
+- **16.9 million inflection mappings** (via MorfFlex CZ 2.1, plus harvested colloquial forms) so every word form resolves to its definition
 - **2.4 million unique lookupable forms**
 - **41,000+ Czech-English sentence pairs** from Tatoeba
 
@@ -20,9 +20,14 @@ Data sources:
 |--------|---------|-----------------|
 | English Wiktionary (via kaikki.org) | 69,770 | Rich definitions, examples, etymology, pronunciation |
 | Svobodne Slovniky | 67,999 | Broad vocabulary coverage |
-| DeepSeek-generated | 11,407 | Gap-filling for words found in real Czech texts |
+| DeepSeek-generated | 13,819 | Gap-filling for words found in books and YouTube captions |
+| Claude-generated | 9,202 | Gap-filling for words found in TV-show subtitles (colloquial, dialect, period vocabulary) |
 | MorfFlex CZ 2.1 | 16.8M mappings | Inflected form -> lemma resolution |
 | Tatoeba | 41,869 pairs | Czech-English sentence examples |
+
+Coverage was verified against ~3.6M tokens of subtitles from 66 Czech TV shows
+and films: **98.6% of all tokens** and **99.99% of real words** (excluding
+proper nouns, foreign dialogue, and typos) resolve to a definition.
 
 ## Download
 
@@ -181,6 +186,38 @@ Confirmed colloquial forms are linked to their standard headword rather than
 given their own entry, so `cejtím` resolves to `cítit` and `tohodle` to `tenhle`
 without duplicating the dictionary.
 
+### 6. (Optional) Expand coverage with TV-show subtitles
+
+`processing/process_show_subs.py` folds a directory of show subtitles (one
+folder per show, `.vtt`/`.srt`/`.txt`, zips included, duplicates deduped by
+content) into the dictionary. Broadcast subs are human-made, so the noise is
+proper nouns, Slovak dialogue and colloquial spellings rather than ASR errors;
+dispersion is measured across shows instead of channels.
+
+The LLM steps are decoupled from the script so any model (an API loop or a
+swarm of Claude agents) can do them:
+
+```bash
+# 1. Coverage report, overall and per show
+python3 processing/process_show_subs.py --dir ~/Subtitles --per-show
+
+# 2. Export filtered candidates (word, contexts, dispersion, caps ratio)
+python3 processing/process_show_subs.py --dir ~/Subtitles \
+        --export-candidates candidates.json
+
+# 3. Screen candidates and generate entries with the model of your choice,
+#    producing screen.json ({word: {"c": category, "lemma": headword}})
+#    and entries.json ({lemma: entry_json})
+
+# 4. Import, link colloquial forms, and measure final coverage
+python3 processing/process_show_subs.py --dir ~/Subtitles \
+        --import-screen screen.json --import-entries entries.json --per-show
+```
+
+The 2026-08 run over 66 shows (~3.6M tokens, 1,046 subtitle files) screened
+20,592 candidate forms with a swarm of 52 Claude Sonnet agents and generated
+9,202 new entries with 117 more, lifting real-word token coverage to 99.99%.
+
 ## Project structure
 
 ```
@@ -201,6 +238,7 @@ processing/
     process_yt_corpus.py     - Screen + generate via the DeepSeek API
     yt_swarm.py              - Shard/merge the same work for agent workers
     apply_yt_results.py      - Write screened/generated results to the DB
+    process_show_subs.py     - Fold TV-show subtitle directories into the DB
 tools/
     test_dictionary.py       - Look up words and test coverage
     build_channel_list.py    - Rebuild data/youtube_channels.tsv from the sheet

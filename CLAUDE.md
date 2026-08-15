@@ -15,6 +15,7 @@ A comprehensive Czech-English offline dictionary with full morphological coverag
 - `processing/build_yt_corpus.py` - Parses subs into `youtube_corpus/` text + word statistics
 - `processing/yt_word_filter.py` - Noise filters + LLM screening prompt for auto-caption words
 - `processing/process_yt_corpus.py` - Folds the YouTube corpus into the database
+- `processing/process_show_subs.py` - Folds a directory of TV-show subtitles into the database; exports candidates to / imports verdicts+entries from JSON so screening/generation can run on any model (used with Claude agent swarms)
 - `tools/test_dictionary.py` - Word lookup and coverage testing
 
 ## Key Design Decisions
