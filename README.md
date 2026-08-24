@@ -151,14 +151,18 @@ python3 processing/process_yt_corpus.py --screen --generate
 
 # 4b. ...or hand the same work to a swarm of Claude agents
 python3 processing/dump_yt_candidates.py          # candidates + contexts
-python3 processing/yt_swarm.py shard-screen       # -> shards to classify
+python3 processing/yt_swarm.py shard-screen       # -> shards + INSTRUCTIONS.md
 #   run one agent per shard, writing shard_NNN.out.json
 python3 processing/yt_swarm.py merge-screen
-python3 processing/yt_swarm.py shard-gen          # -> shards to write entries for
-#   run one agent per shard (see shards/gen/INSTRUCTIONS.md)
+python3 processing/yt_swarm.py shard-gen          # -> shards + INSTRUCTIONS.md
+#   run one agent per shard, writing shard_NNN.out.json
 python3 processing/yt_swarm.py merge-gen
 python3 processing/apply_yt_results.py            # write to DB + measure
 ```
+
+Each sharding command also drops the worker brief the agents follow into the
+shard directory as `INSTRUCTIONS.md`; the briefs are tracked in
+`processing/prompts/` (`swarm_screen_words.md`, `swarm_gen_entries.md`).
 
 Both paths write to the same two caches (`screen_results.json`,
 `generated_entries.json`), so they are interchangeable and resumable. The swarm
@@ -205,8 +209,9 @@ python3 processing/process_show_subs.py --dir ~/Subtitles --per-show
 python3 processing/process_show_subs.py --dir ~/Subtitles \
         --export-candidates candidates.json
 
-# 3. Screen candidates and generate entries with the model of your choice,
-#    producing screen.json ({word: {"c": category, "lemma": headword}})
+# 3. Screen candidates and generate entries with the model of your choice
+#    (briefs to hand the model: processing/prompts/), producing
+#    screen.json ({word: {"c": category, "lemma": headword}})
 #    and entries.json ({lemma: entry_json})
 
 # 4. Import, link colloquial forms, and measure final coverage
@@ -237,6 +242,7 @@ processing/
     dump_yt_candidates.py    - Dump candidate words with contexts
     process_yt_corpus.py     - Screen + generate via the DeepSeek API
     yt_swarm.py              - Shard/merge the same work for agent workers
+    prompts/                 - Worker briefs handed to screening/generating agents
     apply_yt_results.py      - Write screened/generated results to the DB
     process_show_subs.py     - Fold TV-show subtitle directories into the DB
 tools/
@@ -246,10 +252,12 @@ tools/
     known_analyzer.py        - Vocabulary coverage analyzer
     sentence_coverage.py     - Sentence-level coverage analysis
 docs/
+    PORTING.md               - Building this for another language
     ARCHITECTURE.md          - Technical design and schema
     PIPELINE.md              - Text processing pipeline design
     PLAN.md                  - Implementation plan
     RESEARCH.md              - Data source research
+    porting/                 - Worked build prompts for Dutch and German
 ```
 
 ## How it works
@@ -260,6 +268,14 @@ docs/
 4. **Export** to multiple formats (StarDict, Kindle MOBI, Yomitan), each using the optimal strategy for that platform
 
 The cross-reference resolver handles Wiktionary entries like "inflection of X" by inlining the actual definition from X, so you get real definitions instead of grammatical labels.
+
+## Building this for another language
+
+The design ports cleanly -- SQLite source of truth, bulk form->lemma table, LLM
+gap-filling, three exporters -- but the data sources and grammar fields do not.
+[`docs/PORTING.md`](docs/PORTING.md) lists what has to be swapped, where Czech
+is hardcoded, and how the corpus and agent-swarm phases translate. Two worked
+build prompts (Dutch, German) are in [`docs/porting/`](docs/porting/).
 
 ## License
 

@@ -35,6 +35,7 @@ SCREEN_CACHE = CORPUS_DIR / "screen_results.json"
 GEN_CACHE = CORPUS_DIR / "generated_entries.json"
 SCREEN_SHARDS = CORPUS_DIR / "shards" / "screen"
 GEN_SHARDS = CORPUS_DIR / "shards" / "gen"
+PROMPTS = PROJECT_ROOT / "processing" / "prompts"
 
 VALID_CATS = {"word", "proper_noun", "foreign", "asr_error"}
 
@@ -59,6 +60,17 @@ def save_json(p, data):
     tmp = Path(str(p) + ".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     tmp.replace(p)
+
+
+def install_brief(outdir, template, **subs):
+    """Drop the worker brief beside the shards so every agent gets the same one."""
+    text = (PROMPTS / template).read_text(encoding="utf-8")
+    for key, value in subs.items():
+        text = text.replace("{{%s}}" % key, value)
+    dest = Path(outdir) / "INSTRUCTIONS.md"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(text, encoding="utf-8")
+    return dest
 
 
 def write_shards(records, outdir, size, prefix="shard"):
@@ -100,8 +112,13 @@ def cmd_shard_screen(args):
     records = [{"word": r["word"], "freq": r.get("freq", 0),
                 "channels": r.get("channels", 0), "pos_hint": r.get("pos_hint", ""),
                 "contexts": r.get("contexts", [])[:2]} for r in records]
+    from yt_word_filter import SCREEN_SYSTEM_PROMPT
+
     paths = write_shards(records, SCREEN_SHARDS, args.size)
+    brief = install_brief(SCREEN_SHARDS, "swarm_screen_words.md",
+                          RULES=SCREEN_SYSTEM_PROMPT)
     print(f"wrote {len(paths)} shards of <= {args.size} into {SCREEN_SHARDS}")
+    print(f"worker brief: {brief}")
     for p in paths:
         print(f"  {p}")
 
@@ -181,7 +198,9 @@ def cmd_shard_gen(args):
           f"cached: {sum(1 for l in rep if l in gen_cache):,}")
     print(f"need generation: {len(records):,}")
     paths = write_shards(records, GEN_SHARDS, args.size)
+    brief = install_brief(GEN_SHARDS, "swarm_gen_entries.md")
     print(f"wrote {len(paths)} shards of <= {args.size} into {GEN_SHARDS}")
+    print(f"worker brief: {brief}")
 
 
 def cmd_merge_gen(args):
