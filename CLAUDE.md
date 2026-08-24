@@ -17,6 +17,8 @@ A comprehensive Czech-English offline dictionary with full morphological coverag
 - `processing/process_yt_corpus.py` - Folds the YouTube corpus into the database
 - `processing/process_show_subs.py` - Folds a directory of TV-show subtitles into the database; exports candidates to / imports verdicts+entries from JSON so screening/generation can run on any model (used with Claude agent swarms)
 - `tools/test_dictionary.py` - Word lookup and coverage testing
+- `processing/prompts/*.md` - Worker briefs for the screening/generation agent swarm; `yt_swarm.py` copies them into each shard directory as `INSTRUCTIONS.md`
+- `docs/PORTING.md` - What to swap when rebuilding this for another language (worked build prompts in `docs/porting/`)
 
 ## Key Design Decisions
 

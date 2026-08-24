@@ -333,6 +333,8 @@ def main():
         Path(args.export_candidates).write_text(
             json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
         print(f"\nWrote {len(payload):,} candidates -> {args.export_candidates}")
+        print("Worker briefs for the screening/generation models: "
+              "processing/prompts/")
 
     screen = {}
     if args.import_screen:
