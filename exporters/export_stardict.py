@@ -18,6 +18,7 @@ import sys
 import re
 import argparse
 import html
+import subprocess
 from pathlib import Path
 from collections import defaultdict
 
@@ -73,6 +74,178 @@ def is_crossref_sense(definition_en):
     # Check that the prefix consists entirely of known grammatical/relationship terms
     prefix_words = set(re.split(r'[\s/,-]+', prefix))
     return prefix_words.issubset(_XREF_KEYWORDS)
+
+
+# ---------------------------------------------------------------------------
+# Name-only entries and the shared compact (redirect) renderer
+# ---------------------------------------------------------------------------
+
+# Wiktionary contributes ~9.9k proper_noun entries, most glossed only "a male
+# surname". Those must never be the first thing a reader sees for a word that is
+# also an ordinary word (ostrý, nový, houba, čech ...), so they are collapsed to
+# a short tag and pushed behind every real sense.
+_NAME_ONLY_RE = re.compile(
+    r'^\s*(?:an?\s+)?(?:male\s+|female\s+|common\s+|masculine\s+|feminine\s+)?'
+    r'(?:surname|given\s+name|family\s+name|patronymic)\b',
+    re.IGNORECASE,
+)
+
+
+def is_name_sense(definition_en):
+    """Return True for a bare 'a male surname' / 'a female given name' gloss."""
+    if not definition_en:
+        return False
+    return bool(_NAME_ONLY_RE.match(definition_en.strip()))
+
+
+def is_name_only_entry(entry_data):
+    """Return True if every sense of an entry is a bare name label."""
+    senses = entry_data.get("senses", [])
+    if not senses:
+        return False
+    return all(is_name_sense(s.get("definition_en", "")) for s in senses)
+
+
+def name_entry_label(entry_data):
+    """Short label for a name-only entry: 'surname', 'given name', ..."""
+    kinds = []
+    for s in entry_data.get("senses", []):
+        defn = (s.get("definition_en") or "").lower()
+        if "given name" in defn:
+            kind = "given name"
+        elif "patronymic" in defn:
+            kind = "patronymic"
+        else:
+            kind = "surname"
+        if kind not in kinds:
+            kinds.append(kind)
+    return ", ".join(kinds) or "name"
+
+
+def format_name_entry_html(entry_data, lemma):
+    """Collapse a name-only entry to a single short tag."""
+    label = name_entry_label(entry_data)
+    return f"<b>{html.escape(entry_data.get('lemma', lemma))}</b> <small>({label})</small>"
+
+
+# Wiktionary declension tables leak their own metadata into inflections.form:
+# "-" alone accounts for 33,479 rows, plus "i-stem"/"t-stem" labels and whole
+# explanatory sentences. Each becomes a real index key -- the "-" entry alone
+# rendered as a 240 KB blob -- so they are dropped at export time.
+_STEM_LABEL_RE = re.compile(r'^[a-z]+-stem$', re.IGNORECASE)
+_HAS_LETTER_RE = re.compile(r'[a-zA-Zá-žÁ-Ž]')
+_TABLE_LABELS = {
+    "ženské křestní jméno", "mužské křestní jméno", "křestní jméno", "příjmení",
+}
+
+
+def is_usable_form(form):
+    """Return False for Wiktionary table metadata masquerading as a word form."""
+    if not form or len(form) > 60:
+        return False
+    if not _HAS_LETTER_RE.search(form):
+        return False
+    if _STEM_LABEL_RE.match(form):
+        return False
+    return form.strip().lower() not in _TABLE_LABELS
+
+
+_MAJKA = PROJECT_ROOT / "majka"
+_MAJKA_DICT = PROJECT_ROOT / "majka.w-lt"
+_HEADWORD_WORD_RE = re.compile(r"[a-zá-žA-ZÁ-Ž']+")
+# Punctuation/digits that mark a definition or an English sentence rather than
+# a headword: "= subprime mortgage", "1,852 m", "what the f--- was that?"
+_SENTENCEY_RE = re.compile(r'[."?!=]|\d|\s-\s|,\s')
+
+
+def _czech_vocabulary(tokens):
+    """Tokens Majka recognises as Czech, or None when Majka is unavailable."""
+    if not (_MAJKA.exists() and _MAJKA_DICT.exists()):
+        return None
+    try:
+        proc = subprocess.run(
+            [str(_MAJKA), "-f", str(_MAJKA_DICT), "-p"],
+            input="\n".join(sorted(tokens)),
+            capture_output=True, text=True, timeout=600,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    recognised = set()
+    for line in proc.stdout.splitlines():
+        head, sep, rest = line.partition(":")
+        if sep and rest.strip():
+            recognised.add(head)
+    return recognised
+
+
+def junk_headwords(rows):
+    """Multi-word Svobodne headwords that are really English text or definitions.
+
+    Svobodne's Czech column sometimes holds an English gloss or an entire
+    definition, and those land in `entries.lemma` as though they were Czech
+    headwords: "24 hours a day, 7 days a week", "= subprime mortgage", a 293-char
+    explanation of DRM. Each one becomes a real lookup key in every exported
+    format and a 293-byte key even breaks the StarDict length limit.
+
+    `rows` is an iterable of (lemma, source); returns the lemmas to skip.
+    The Czech-ness test runs only on Svobodne rows, so genuine loan phrases
+    (a posteriori, joint venture, persona non grata) and Czech idioms
+    ("jako kůl v plotě") are kept.
+    """
+    multiword = [(l, s) for l, s in rows if " " in l]
+    vocab = _czech_vocabulary(
+        {t for l, _ in multiword for t in _HEADWORD_WORD_RE.findall(l)})
+
+    junk = set()
+    for lemma, source in multiword:
+        if len(lemma) > 60:
+            junk.add(lemma)
+            continue
+        if source != "svobodne" or vocab is None:
+            continue
+        words = [t for t in _HEADWORD_WORD_RE.findall(lemma) if len(t) > 1]
+        if not words:
+            continue
+        if sum(1 for t in words if t in vocab) / len(words) >= 0.5:
+            continue
+        if (len(lemma.split()) >= 4 or _SENTENCEY_RE.search(lemma)
+                or len(lemma) > 40):
+            junk.add(lemma)
+    return junk
+
+
+COMPACT_SENSE_CAP = 4
+
+
+def build_compact(entry_data, lemma, senses=None, cap=COMPACT_SENSE_CAP):
+    """Build the one-line summary shown when a lookup lands on an inflected form.
+
+    This used to render senses[0] only, which silently hid every secondary
+    meaning behind any inflected form: looking up "houbičku" returned
+    "houba: mushroom" and threw away the "sponge" sense that was sitting in the
+    same entry. Show every sense, numbered, capped so the popup stays small.
+    """
+    if senses is None:
+        senses = entry_data.get("senses", [])
+    head = f"<b>{html.escape(lemma)}</b>"
+    if is_name_only_entry(entry_data):
+        return format_name_entry_html(entry_data, lemma)
+
+    defs = []
+    for s in senses:
+        defn = (s.get("definition_en") or "").strip()
+        if defn and defn not in defs:
+            defs.append(defn)
+    if not defs:
+        return head
+
+    shown = defs[:cap]
+    if len(shown) == 1:
+        return f"{head}: {html.escape(shown[0])}"
+    body = "; ".join(f"{i}. {html.escape(d)}" for i, d in enumerate(shown, 1))
+    if len(defs) > cap:
+        body += "; …"
+    return f"{head}: {body}"
 
 
 _QUOTE_CHARS = '"\'“”‘’'
@@ -166,6 +339,9 @@ def parse_crossref(definition_en):
         target = remainder
 
     target = target.rstrip(":;,. ").strip().strip(_QUOTE_CHARS).lower()
+    # Wiktionary appends an aspect marker to some targets ("... of stát pf"),
+    # which otherwise makes the redirect dead-end on a lemma that does not exist.
+    target = re.sub(r'\s+(?:pf|impf|perf|imperf)\.?$', '', target).strip()
 
     return rel, target, embedded
 
@@ -183,7 +359,7 @@ def classify_entry_senses(entry_data):
     return real, xref
 
 
-def resolve_crossref_entry(entry_data, entries_by_lemma):
+def resolve_crossref_entry(entry_data, entries_by_lemma, phrase_links=None):
     """Resolve a cross-reference-only entry to the target's real definition.
 
     The output uses the same visual format as inflection redirects: the target
@@ -234,12 +410,15 @@ def resolve_crossref_entry(entry_data, entries_by_lemma):
                     resolved["senses"] = real_senses
 
                 resolved_html = format_entry_html(
-                    resolved, target_display, target_entry.get("pos", "")
+                    resolved, target_display, target_entry.get("pos", ""),
+                    phrases=(phrase_links or {}).get(target_display.lower()),
                 )
-                first_def = embedded or real_senses[0].get("definition_en", "")
-                resolved_compact = (
-                    f"<b>{html.escape(target_display)}</b>: {html.escape(first_def)}"
-                )
+                if embedded:
+                    resolved_compact = (
+                        f"<b>{html.escape(target_display)}</b>: {html.escape(embedded)}"
+                    )
+                else:
+                    resolved_compact = build_compact(resolved, target_display)
                 return resolved_html, resolved_compact
 
         elif embedded:
@@ -252,7 +431,63 @@ def resolve_crossref_entry(entry_data, entries_by_lemma):
     return None, None
 
 
-def format_entry_html(entry_json, lemma, pos):
+PHRASE_BLOCK_CAP = 6
+ALSO_CAP = 10
+
+
+def load_phrase_links(conn, skip=()):
+    """component lemma -> [(phrase, first English gloss)], best first.
+
+    Built by tools/build_phrase_links.py. Empty dict if that has not been run.
+    """
+    c = conn.cursor()
+    try:
+        c.execute("SELECT component, phrase, phrase_pos, score FROM phrase_links "
+                  "ORDER BY component, score DESC")
+        rows = c.fetchall()
+    except sqlite3.OperationalError:
+        print("  (no phrase_links table -- run tools/build_phrase_links.py)")
+        return {}
+
+    c.execute("SELECT lemma, entry_json FROM entries WHERE lemma LIKE '% %'")
+    gloss = {}
+    for lemma, entry_json in c:
+        if lemma in gloss:
+            continue
+        try:
+            senses = (json.loads(entry_json).get("senses") or [])
+        except json.JSONDecodeError:
+            continue
+        if senses:
+            text = (senses[0].get("definition_en") or "").strip()
+            if text:
+                gloss[lemma] = text
+
+    links = defaultdict(list)
+    for component, phrase, _pos, _score in rows:
+        if phrase in skip:
+            continue
+        if len(links[component]) >= PHRASE_BLOCK_CAP:
+            continue
+        links[component].append((phrase, gloss.get(phrase, "")))
+    print(f"  {len(links):,} words carry phrase back-links")
+    return links
+
+
+def format_phrase_block(phrases):
+    """Trailing 'Phrases:' line: each linked phrase with its own gloss."""
+    if not phrases:
+        return None
+    parts = []
+    for phrase, gloss in phrases:
+        item = f"<i>{html.escape(phrase)}</i>"
+        if gloss:
+            item += f" — {html.escape(gloss)}"
+        parts.append(item)
+    return "<small>Phrases: " + " · ".join(parts) + "</small>"
+
+
+def format_entry_html(entry_json, lemma, pos, phrases=None, also_en=None):
     """Format a dictionary entry as compact HTML for StarDict."""
     try:
         entry = json.loads(entry_json) if isinstance(entry_json, str) else entry_json
@@ -322,10 +557,20 @@ def format_entry_html(entry_json, lemma, pos):
                     ex_str += "</small>"
                     parts.append(ex_str)
 
+    # Bare English synonyms merged from Svobodné, kept out of the numbered
+    # senses so they cannot dilute the curated Wiktionary definitions.
+    also = also_en if also_en is not None else entry.get("also_en") or []
+    if also:
+        parts.append("<small>also: " + html.escape(", ".join(also[:ALSO_CAP])) + "</small>")
+
     # Notes
     notes = entry.get("notes", "")
     if notes:
         parts.append(f"<small>Note: {html.escape(notes)}</small>")
+
+    phrase_block = format_phrase_block(phrases)
+    if phrase_block:
+        parts.append(phrase_block)
 
     return "<br>".join(parts)
 
@@ -345,33 +590,47 @@ def export_stardict(db_path=DB_PATH, output_dir=DEFAULT_OUTPUT_DIR, dict_name=DE
     entries = c.fetchall()
     print(f"  {len(entries)} entries loaded")
 
+    junk = junk_headwords((e["lemma"], e["source"]) for e in entries)
+    if junk:
+        entries = [e for e in entries if e["lemma"] not in junk]
+        print(f"  dropped {len(junk)} Svobodne pseudo-headwords "
+              f"(English text / definitions stored as Czech words)")
+
     # Collect all inflections
     print("Loading inflections...")
     c.execute("SELECT form, lemma, pos FROM inflections")
-    inflections = c.fetchall()
-    print(f"  {len(inflections)} inflection mappings loaded")
+    inflections = [r for r in c.fetchall() if is_usable_form(r["form"])]
+    print(f"  {len(inflections)} inflection mappings loaded (table metadata dropped)")
+
+    print("Loading phrase back-links...")
+    phrase_links = load_phrase_links(conn, junk)
 
     # Build lemma -> entry_html lookup and lemma -> compact summary
     print("Formatting entries...")
     lemma_html = {}      # (lemma, pos) -> full html
     lemma_compact = {}   # (lemma, pos) -> compact one-liner for inflection entries
     lemma_by_name = defaultdict(list)  # lemma_str -> [(lemma, pos)]
+    name_only_keys = set()  # (lemma, pos) whose every sense is just "a male surname"
 
     # Also build entries_by_lemma for cross-reference resolution
     entries_by_lemma = defaultdict(list)  # lowercase lemma -> [parsed entry_json dicts]
 
     for entry in entries:
         key = (entry["lemma"], entry["pos"])
-        lemma_html[key] = format_entry_html(entry["entry_json"], entry["lemma"], entry["pos"])
+        lemma_html[key] = format_entry_html(
+            entry["entry_json"], entry["lemma"], entry["pos"],
+            phrases=phrase_links.get(entry["lemma"].lower()),
+        )
         lemma_by_name[entry["lemma"]].append(key)
 
         # Build compact summary for inflection redirects (no POS/gender for cleaner display)
         try:
             entry_data = json.loads(entry["entry_json"])
             entries_by_lemma[entry["lemma"].lower()].append(entry_data)
-            senses = entry_data.get("senses", [])
-            first_def = senses[0].get("definition_en", "") if senses else ""
-            compact = f"<b>{html.escape(entry['lemma'])}</b>: {html.escape(first_def)}"
+            compact = build_compact(entry_data, entry["lemma"])
+            if is_name_only_entry(entry_data):
+                name_only_keys.add(key)
+                lemma_html[key] = format_name_entry_html(entry_data, entry["lemma"])
         except:
             compact = f"<b>{html.escape(entry['lemma'])}</b>"
         lemma_compact[key] = compact
@@ -393,7 +652,7 @@ def export_stardict(db_path=DB_PATH, output_dir=DEFAULT_OUTPUT_DIR, dict_name=DE
         if xref_senses and not real_senses:
             # All senses are cross-references: resolve to target
             resolved_html, resolved_compact = resolve_crossref_entry(
-                entry_data, entries_by_lemma
+                entry_data, entries_by_lemma, phrase_links
             )
             if resolved_html:
                 lemma_html[key] = resolved_html
@@ -404,9 +663,11 @@ def export_stardict(db_path=DB_PATH, output_dir=DEFAULT_OUTPUT_DIR, dict_name=DE
             # Mixed entry: strip crossref senses, keep real ones
             filtered = dict(entry_data)
             filtered["senses"] = real_senses
-            lemma_html[key] = format_entry_html(filtered, entry["lemma"], entry["pos"])
-            first_def = real_senses[0].get("definition_en", "")
-            lemma_compact[key] = f"<b>{html.escape(entry['lemma'])}</b>: {html.escape(first_def)}"
+            lemma_html[key] = format_entry_html(
+                filtered, entry["lemma"], entry["pos"],
+                phrases=phrase_links.get(entry["lemma"].lower()),
+            )
+            lemma_compact[key] = build_compact(filtered, entry["lemma"])
             mixed_fixed += 1
 
     print(f"  Resolved {resolved_count} cross-reference entries")
@@ -415,14 +676,25 @@ def export_stardict(db_path=DB_PATH, output_dir=DEFAULT_OUTPUT_DIR, dict_name=DE
     # Build the full word list: lemma entries + inflected form entries
     # Each item is (headword, definition_html)
     print("Building word list with inflected forms...")
-    word_list = []
 
-    # Add lemma entries
+    # Lemma entries, split so that name-only entries can be appended after every
+    # real sense of the same headword instead of competing with them.
+    lemma_items = []  # (word, html) -- ordinary entries
+    name_items = []   # (word, html) -- name-only entries, emitted last
+    word_lemma_compacts = defaultdict(set)  # word -> compact strings of its own lemma entries
     for entry in entries:
-        word_list.append((entry["lemma"].lower(), lemma_html[(entry["lemma"], entry["pos"])]))
+        key = (entry["lemma"], entry["pos"])
+        word = entry["lemma"].lower()
+        item = (word, lemma_html[key])
+        if key in name_only_keys:
+            name_items.append(item)
+        else:
+            lemma_items.append(item)
+        word_lemma_compacts[word].add(lemma_compact[key])
 
-    # Add inflected form entries (compact: first sense only to save space)
+    # Add inflected form entries (compact: all senses, capped by COMPACT_SENSE_CAP)
     print("Building compact inflection entries...")
+    inflection_items = []  # (form, html)
     inflection_groups = defaultdict(list)
     for infl in inflections:
         inflection_groups[infl["form"]].append((infl["lemma"], infl["pos"]))
@@ -452,32 +724,35 @@ def export_stardict(db_path=DB_PATH, output_dir=DEFAULT_OUTPUT_DIR, dict_name=DE
                 parts.append(compact)
 
         if parts:
-            final_html = "<br>".join(parts)
-            word_list.append((form, final_html))
+            inflection_items.append((form, "<br>".join(parts)))
 
-    # Deduplicate: if an inflected form is the same as a lemma, prefer the lemma entry
-    # We tag entries so we can distinguish lemma entries from inflection entries
     print("Deduplicating...")
     word_dict = {}    # word -> definition html
-    word_is_lemma = {} # word -> bool (is this a lemma entry?)
 
-    # Add lemma entries first (they take priority)
-    lemma_words = set()
-    for word, definition in word_list[:len(entries)]:  # First N items are lemma entries
+    def _append_block(word, definition):
         if word in word_dict:
-            # Multiple POS for same lemma - merge
             word_dict[word] = word_dict[word] + "<hr>" + definition
         else:
             word_dict[word] = definition
-        word_is_lemma[word] = True
-        lemma_words.add(word)
 
-    # Add inflection entries (skip if lemma entry already exists)
-    for word, definition in word_list[len(entries):]:  # Remaining items are inflection entries
+    # Lemma entries take priority, ordinary senses before name-only ones.
+    for word, definition in lemma_items:
+        _append_block(word, definition)
+    for word, definition in name_items:
+        _append_block(word, definition)
+
+    # Inflection redirects. A form that is ALSO a lemma used to be dropped
+    # outright, which made unrelated readings unreachable: "letu" is the genitive
+    # of "léto" (summer) but was swallowed by the lemma "let" (flight). Keep the
+    # lemma entry first, then append any redirect that points somewhere else.
+    for word, definition in inflection_items:
         if word not in word_dict:
             word_dict[word] = definition
-            word_is_lemma[word] = False
-        # If lemma entry exists, keep it (don't overwrite with inflection)
+            continue
+        own = word_lemma_compacts.get(word, ())
+        extra = [part for part in definition.split("<br>") if part and part not in own]
+        if extra:
+            word_dict[word] = word_dict[word] + "<hr>" + "<br>".join(extra)
 
     # Sort by StarDict convention (case-insensitive, then case-sensitive)
     print(f"Sorting {len(word_dict)} entries...")

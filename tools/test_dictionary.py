@@ -12,7 +12,7 @@ import sys
 import re
 import subprocess
 import json
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -113,6 +113,51 @@ def tokenize_text(text):
     return tokens
 
 
+def _thin_lookups(conn, resolved_lemma):
+    """Which resolved lookups land on an entry tools/audit_entries.py calls thin."""
+    try:
+        sys.path.insert(0, str(PROJECT_ROOT / "tools"))
+        sys.path.insert(0, str(PROJECT_ROOT / "exporters"))
+        from audit_entries import classify
+        from export_stardict import is_crossref_sense
+    except ImportError as exc:
+        print(f"  (quality check unavailable: {exc})")
+        return None, None
+
+    c = conn.cursor()
+    by_lemma = defaultdict(list)
+    c.execute("SELECT lemma, pos, source, entry_json FROM entries")
+    for lemma, pos, source, entry_json in c:
+        try:
+            by_lemma[lemma].append((pos, source, json.loads(entry_json)))
+        except json.JSONDecodeError:
+            continue
+
+    real_sense_lemmas = {
+        lemma for lemma, variants in by_lemma.items()
+        if any(not is_crossref_sense(sense.get("definition_en") or "")
+               for _p, _s, data in variants
+               for sense in data.get("senses", []))
+    }
+
+    c.execute("SELECT DISTINCT form FROM inflections WHERE form <> lemma")
+    inflected_forms = {row[0] for row in c}
+
+    verdict = {}
+    thin_forms, reasons = set(), Counter()
+    for form, lemma in resolved_lemma.items():
+        if lemma not in verdict:
+            variants = by_lemma.get(lemma)
+            verdict[lemma] = classify(
+                variants, real_sense_lemmas.__contains__,
+                lemma in inflected_forms) if variants else "no_entry"
+        reason = verdict[lemma]
+        if reason:
+            thin_forms.add(form)
+            reasons[reason] += 1
+    return thin_forms, reasons
+
+
 def test_coverage(conn, text_file):
     """Test dictionary coverage against a Czech text."""
     print(f"Testing coverage against: {text_file}")
@@ -130,20 +175,27 @@ def test_coverage(conn, text_file):
 
     c = conn.cursor()
 
-    # Check coverage
+    # Check coverage. This is an EXISTENCE test only -- it says nothing about
+    # whether the entry a word resolves to is any good, which is why it can read
+    # 99.9% while real lookups return "diminutive of houba" or "a male surname".
+    # The quality figure below is the number worth watching.
     found_as_lemma = set()
     found_as_inflection = set()
     not_found = set()
+    resolved_lemma = {}   # word form -> the lemma its lookup lands on
 
     for word in word_freq:
         c.execute("SELECT 1 FROM entries WHERE lemma = ?", (word,))
         if c.fetchone():
             found_as_lemma.add(word)
+            resolved_lemma[word] = word
             continue
 
-        c.execute("SELECT 1 FROM inflections WHERE form = ?", (word,))
-        if c.fetchone():
+        c.execute("SELECT lemma FROM inflections WHERE form = ? LIMIT 1", (word,))
+        row = c.fetchone()
+        if row:
             found_as_inflection.add(word)
+            resolved_lemma[word] = row[0]
             continue
 
         not_found.add(word)
@@ -163,6 +215,25 @@ def test_coverage(conn, text_file):
     print(f"    As inflection: {len(found_as_inflection):,}")
     print(f"    Not found: {len(not_found):,}")
     print(f"  Token coverage: {tokens_covered:,} / {len(tokens):,} ({token_pct:.1f}%)")
+
+    thin_forms, thin_reasons = _thin_lookups(conn, resolved_lemma)
+    if thin_forms is not None:
+        good_forms = total_found - len(thin_forms)
+        thin_tokens = sum(word_freq[w] for w in thin_forms)
+        good_tokens = tokens_covered - thin_tokens
+        print(f"\n  Quality (does the entry actually say something useful?)")
+        print(f"    Word forms landing on a usable entry: "
+              f"{good_forms:,} / {unique_forms:,} "
+              f"({good_forms / unique_forms * 100 if unique_forms else 0:.1f}%)")
+        print(f"    Tokens landing on a usable entry:     "
+              f"{good_tokens:,} / {len(tokens):,} "
+              f"({good_tokens / len(tokens) * 100 if tokens else 0:.1f}%)")
+        for reason, count in thin_reasons.most_common():
+            print(f"      {reason:<24} {count:,} forms")
+        worst = sorted(thin_forms, key=lambda w: -word_freq[w])[:15]
+        if worst:
+            print(f"    Most-read thin lookups: "
+                  + ", ".join(f"{w} ({word_freq[w]})" for w in worst))
 
     # Show most frequent missing words
     missing_by_freq = sorted(not_found, key=lambda w: -word_freq[w])

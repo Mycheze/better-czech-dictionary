@@ -48,10 +48,42 @@ use them to determine meaning, but never copy their errors.
 5. Order senses most common first. Do not invent meanings — if a word is
    genuinely opaque, give your single best reading and say so in `notes`.
 6. Accuracy about Czech grammar matters more than coverage or fluency.
+7. **Enumerate every common sense, not just the most frequent one.** This is the
+   most important rule here. A reader meets the word in one specific sentence,
+   and a single-sense entry sends them away with a confidently wrong answer.
+   `houbička` was shipped as "diminutive of houba" (little mushroom) when the
+   reading in the text was *sponge*; `díl` as "part" when it meant *episode*;
+   `pár` as "pair" when it meant *a few*. If a word has a second or third
+   everyday meaning — a concrete/abstract split, a technical or domain use, a
+   colloquial use — write it as its own sense.
+8. **Never return a definition that is only a list of bare English synonyms.**
+   "drag, haul, lug" is not an entry. Each sense needs enough of a gloss to tell
+   it apart from the others: give the domain, the typical object, or a
+   parenthetical ("to withdraw (money from an account)").
+9. **Reflexives.** For a verb, say whether the `se` / `si` form means something
+   different from the bare verb. When it does, emit a SECOND entry whose `lemma`
+   is `"<verb> se"` (or `"<verb> si"`) with its own senses — `učit` = to teach
+   but `učit se` = to learn; `vrátit` = to give back but `vrátit se` = to come
+   back. When it is merely the ordinary reflexive of the same meaning, say so in
+   `notes` and do not create a second entry.
+10. **Collocations.** If the headword mostly occurs inside a fixed multi-word
+    expression whose meaning is not the sum of its parts, emit that phrase as its
+    own entry too (`lemma: "živý plot"`, `"zbrusu nový"`). Skip transparent
+    combinations.
+11. Do not write surname or given-name glosses for ordinary words.
 
 ## Deliverable
 
 Write a JSON ARRAY of all the entries to the output path you were given
 (the shard path with `.json` replaced by `.out.json`). Every input headword must
-appear exactly once, with `lemma` matching the input `headword` exactly.
+appear exactly once, with `lemma` matching the input `headword` exactly. Extra
+entries created under rules 9 and 10 (`"<verb> se"`, fixed phrases) go in the
+same array as additional elements.
+
+Some shards are re-audits rather than new words: a record may carry an
+`existing` list holding the definitions already in the dictionary, and a
+`reason` saying why it was flagged. Treat `existing` as a starting point to
+correct and extend, not as something to reproduce — the entry was flagged
+precisely because it is incomplete. Keep any existing sense that is right.
+
 Then reply with just the number of entries written.

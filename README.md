@@ -90,6 +90,17 @@ python3 build_dictionary.py          # Import all sources
 python3 build_dictionary.py --stats  # Check statistics
 ```
 
+### 2c. Re-run MorfFlex after adding entries
+
+`import_morfflex` only expands lemmas that exist at the time it runs, and it runs
+last in step 2 — so any entry added later (steps 4-6 below) has no paradigm and is
+only findable in its exact dictionary form. After any run that adds entries:
+
+```bash
+python3 tools/refresh_morfflex.py           # incremental: only lemmas that need it
+python3 tools/refresh_morfflex.py --report  # show what is missing, change nothing
+```
+
 ### 3. Export
 
 ```bash
@@ -246,7 +257,12 @@ processing/
     apply_yt_results.py      - Write screened/generated results to the DB
     process_show_subs.py     - Fold TV-show subtitle directories into the DB
 tools/
-    test_dictionary.py       - Look up words and test coverage
+    test_dictionary.py       - Look up words; coverage AND entry-quality figures
+    build_phrase_links.py    - Index component words -> multi-word entries
+    merge_svobodne_senses.py - Recover Svobodné glosses the import discarded
+    audit_entries.py         - Flag thin entries, ranked by corpus frequency
+    audit_swarm.py           - Shard/merge the re-audit work for agent workers
+    probe_stardict.py        - Assert real lookups in the built StarDict index
     build_channel_list.py    - Rebuild data/youtube_channels.tsv from the sheet
     parse_cs_txt.py          - Czech text tokenizer / frequency analyzer
     known_analyzer.py        - Vocabulary coverage analyzer

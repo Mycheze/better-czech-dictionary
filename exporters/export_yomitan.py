@@ -26,6 +26,13 @@ from collections import defaultdict
 from export_stardict import (
     classify_entry_senses,
     resolve_crossref_entry,
+    is_name_only_entry,
+    name_entry_label,
+    load_phrase_links,
+    is_usable_form,
+    junk_headwords,
+    COMPACT_SENSE_CAP,
+    ALSO_CAP,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -59,7 +66,15 @@ POS_TAGS = {
 }
 
 
-def format_structured_content(entry_data, is_inflection=False, lemma_ref=None):
+def _muted(text, italic=False):
+    style = {"fontSize": "85%", "color": "#555"}
+    if italic:
+        style["fontStyle"] = "italic"
+    return {"tag": "div", "style": style, "content": text}
+
+
+def format_structured_content(entry_data, is_inflection=False, lemma_ref=None,
+                              phrases=None):
     """Build a Yomitan structured-content definition from an entry.
 
     Returns a list of definition objects (strings or structured-content dicts).
@@ -124,27 +139,59 @@ def format_structured_content(entry_data, is_inflection=False, lemma_ref=None):
 
         definitions.append({"type": "structured-content", "content": content})
 
+    # Bare English synonyms merged from Svobodné, kept out of the numbered senses.
+    also = entry_data.get("also_en") or []
+    if also:
+        definitions.append({"type": "structured-content",
+                            "content": [_muted("also: " + ", ".join(also[:ALSO_CAP]))]})
+
+    # Multi-word entries this headword occurs in, so "plot" (fence) can surface
+    # "živý plot" (hedge) and "vrátit" can surface "vrátit se".
+    if phrases:
+        items = []
+        for phrase, gloss in phrases:
+            if items:
+                items.append(" · ")
+            items.append({"tag": "span", "style": {"fontStyle": "italic"}, "content": phrase})
+            if gloss:
+                items.append(f" \u2014 {gloss}")
+        definitions.append({"type": "structured-content",
+                            "content": [_muted(["Phrases: "] + items)]})
+
     return definitions
 
 
-def build_compact_definition(entry_data, lemma_ref):
+def build_compact_definition(entry_data, lemma_ref, cap=COMPACT_SENSE_CAP):
     """Build a compact definition for an inflected form entry.
 
-    Format: bold lemma + colon + first definition. Matches the StarDict
-    inflection compact format so every redirected lookup (inflection forms
-    AND cross-reference lemmas) renders identically.
+    Format: bold lemma + colon + every sense, numbered and capped. Matches the
+    StarDict inflection compact format so every redirected lookup (inflection
+    forms AND cross-reference lemmas) renders identically. Rendering only the
+    first sense here used to hide secondary meanings behind any inflected form
+    (houbičku -> "houba: mushroom", dropping "sponge").
     """
-    senses = entry_data.get("senses", [])
-    first_def = senses[0].get("definition_en", "") if senses else ""
-    if not first_def:
-        return [{"type": "structured-content",
-                 "content": [{"tag": "span", "style": {"fontWeight": "bold"}, "content": lemma_ref}]}]
+    bold = {"tag": "span", "style": {"fontWeight": "bold"}, "content": lemma_ref}
 
-    content = [
-        {"tag": "span", "style": {"fontWeight": "bold"}, "content": lemma_ref},
-        f": {first_def}",
-    ]
-    return [{"type": "structured-content", "content": content}]
+    if is_name_only_entry(entry_data):
+        return [{"type": "structured-content",
+                 "content": [bold, f" ({name_entry_label(entry_data)})"]}]
+
+    defs = []
+    for sense in entry_data.get("senses", []):
+        defn = (sense.get("definition_en") or "").strip()
+        if defn and defn not in defs:
+            defs.append(defn)
+    if not defs:
+        return [{"type": "structured-content", "content": [bold]}]
+
+    shown = defs[:cap]
+    if len(shown) == 1:
+        body = f": {shown[0]}"
+    else:
+        body = ": " + "; ".join(f"{i}. {d}" for i, d in enumerate(shown, 1))
+        if len(defs) > cap:
+            body += "; …"
+    return [{"type": "structured-content", "content": [bold, body]}]
 
 
 def export_yomitan(db_path=DB_PATH, output_dir=DEFAULT_OUTPUT_DIR, dict_name=DEFAULT_DICT_NAME):
@@ -160,13 +207,18 @@ def export_yomitan(db_path=DB_PATH, output_dir=DEFAULT_OUTPUT_DIR, dict_name=DEF
     print("Loading entries from database...")
     c.execute("SELECT lemma, pos, entry_json, source FROM entries ORDER BY lemma")
     entries = c.fetchall()
+
+    junk = junk_headwords((e["lemma"], e["source"]) for e in entries)
+    if junk:
+        entries = [e for e in entries if e["lemma"] not in junk]
+        print(f"  dropped {len(junk)} Svobodne pseudo-headwords")
     print(f"  {len(entries)} entries loaded")
 
     # Load inflections
     print("Loading inflections...")
     c.execute("SELECT form, lemma, pos FROM inflections")
-    inflections = c.fetchall()
-    print(f"  {len(inflections)} inflection mappings loaded")
+    inflections = [r for r in c.fetchall() if is_usable_form(r["form"])]
+    print(f"  {len(inflections)} inflection mappings loaded (table metadata dropped)")
 
     # Build entries_by_lemma for cross-reference resolution
     print("Resolving cross-references...")
@@ -227,6 +279,9 @@ def export_yomitan(db_path=DB_PATH, output_dir=DEFAULT_OUTPUT_DIR, dict_name=DEF
 
     print(f"  Resolved {resolved_count} cross-reference entries")
 
+    print("Loading phrase back-links...")
+    phrase_links = load_phrase_links(conn, junk)
+
     # Build term entries
     print("Building term entries...")
     term_entries = []  # list of 8-element arrays
@@ -243,7 +298,16 @@ def export_yomitan(db_path=DB_PATH, output_dir=DEFAULT_OUTPUT_DIR, dict_name=DEF
         pos = entry["pos"]
         tag_name = POS_TAGS.get(pos, (pos, "partOfSpeech", pos, 0))[0] if pos else ""
 
-        definitions = format_structured_content(entry_data)
+        # Name-only entries ("a male surname") score below everything else so
+        # Yomitan stacks them after the real senses of the same word, and they
+        # carry no phrase block -- the phrases belong to the ordinary word the
+        # name collides with, not to the name.
+        name_only = is_name_only_entry(entry_data)
+        score = -2 if name_only else 0
+
+        definitions = format_structured_content(
+            entry_data,
+            phrases=None if name_only else phrase_links.get(entry["lemma"].lower()))
         if not definitions:
             continue
 
@@ -253,7 +317,7 @@ def export_yomitan(db_path=DB_PATH, output_dir=DEFAULT_OUTPUT_DIR, dict_name=DEF
             "",              # reading (not needed for Czech)
             tag_name,        # definition tags (POS)
             "",              # rules
-            0,               # score
+            score,           # score
             definitions,     # definitions
             sequence,        # sequence number
             "",              # term tags
@@ -267,21 +331,29 @@ def export_yomitan(db_path=DB_PATH, output_dir=DEFAULT_OUTPUT_DIR, dict_name=DEF
     for infl in inflections:
         inflection_groups[infl["form"]].append((infl["lemma"], infl["pos"]))
 
-    lemma_words = {entry["lemma"].lower() for entry in entries}
+    # Compact strings a form already carries via its own lemma entries, so a
+    # redirect that merely repeats the lemma is not emitted twice. A form that is
+    # also a lemma is NOT skipped outright any more: "letu" is the genitive of
+    # "léto" (summer) and was previously swallowed by the lemma "let" (flight).
+    own_lemma_defs = defaultdict(set)
+    for entry in entries:
+        key = (entry["lemma"], entry["pos"])
+        data = resolved_entries.get(key, entry_data_cache.get(key))
+        if data:
+            own_lemma_defs[entry["lemma"].lower()].add(
+                (data.get("lemma", entry["lemma"]),
+                 tuple(s.get("definition_en", "") for s in data.get("senses") or []))
+            )
     infl_count = 0
 
     for form, lemma_list in inflection_groups.items():
-        # Skip if form is already a lemma entry
-        if form in lemma_words:
-            continue
-
         # Build compact definition from all possible lemmas. Dedupe on
         # (target_lemma, first_def) so that multiple source lemmas which all
         # resolve to the same target (e.g. "mladá" and "mladé" both being
         # cross-references to "mladý") don't produce duplicate lines.
         definitions = []
         seen_lemmas = set()
-        seen_target_keys = set()
+        seen_target_keys = set(own_lemma_defs.get(form, ()))
         for lemma, pos in lemma_list:
             if lemma in seen_lemmas:
                 continue
@@ -301,8 +373,8 @@ def export_yomitan(db_path=DB_PATH, output_dir=DEFAULT_OUTPUT_DIR, dict_name=DEF
                 # the bolded headword always points at the canonical lemma.
                 display_lemma = entry_data.get("lemma", lemma)
                 senses = entry_data.get("senses") or []
-                first_def = senses[0].get("definition_en", "") if senses else ""
-                target_key = (display_lemma, first_def)
+                target_key = (display_lemma,
+                              tuple(s.get("definition_en", "") for s in senses))
                 if target_key in seen_target_keys:
                     continue
                 seen_target_keys.add(target_key)

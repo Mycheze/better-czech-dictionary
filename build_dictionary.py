@@ -91,18 +91,34 @@ def create_database(db_path=DB_PATH):
             attribution TEXT
         );
 
+        -- component word -> multi-word entry it appears in, so a reader who
+        -- taps "plot" is offered "živý plot". Built by tools/build_phrase_links.py.
+        CREATE TABLE IF NOT EXISTS phrase_links (
+            component  TEXT NOT NULL,
+            phrase     TEXT NOT NULL,
+            phrase_pos TEXT NOT NULL,
+            score      REAL DEFAULT 0
+        );
+
         CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_lemma_pos
             ON entries(lemma, pos);
         CREATE INDEX IF NOT EXISTS idx_entries_lemma
             ON entries(lemma);
         CREATE INDEX IF NOT EXISTS idx_entries_source
             ON entries(source);
+        -- Without this, every `INSERT OR IGNORE INTO inflections` silently
+        -- degrades to a plain INSERT: 42% of the table (7.2M rows) was exact
+        -- duplicates before it was added.
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_inflections_unique
+            ON inflections(form, lemma, pos, tag, source);
         CREATE INDEX IF NOT EXISTS idx_inflections_form
             ON inflections(form);
         CREATE INDEX IF NOT EXISTS idx_inflections_lemma
             ON inflections(lemma);
         CREATE INDEX IF NOT EXISTS idx_tatoeba_czech
             ON tatoeba_sentences(czech);
+        CREATE INDEX IF NOT EXISTS idx_phrase_links_component
+            ON phrase_links(component);
     """)
 
     conn.commit()
@@ -182,6 +198,28 @@ def parse_kaikki_aspect(entry):
     return aspect, aspect_pair
 
 
+# Wiktionary declension tables leak metadata into the forms list: a bare "-",
+# stem labels like "i-stem", and whole explanatory sentences. Left in, each
+# becomes a real lookup key in every exported format ("-" alone collected 33,479
+# redirects and rendered as a 240 KB blob).
+_STEM_LABEL_RE = re.compile(r'^[a-z]+-stem$', re.IGNORECASE)
+_HAS_LETTER_RE = re.compile(r'[a-zA-Zá-žÁ-Ž]')
+_TABLE_LABELS = {
+    "ženské křestní jméno", "mužské křestní jméno", "křestní jméno", "příjmení",
+}
+
+
+def is_usable_form(form):
+    """Return False for Wiktionary table metadata masquerading as a word form."""
+    if not form or len(form) > 60:
+        return False
+    if not _HAS_LETTER_RE.search(form):
+        return False
+    if _STEM_LABEL_RE.match(form):
+        return False
+    return form.strip().lower() not in _TABLE_LABELS
+
+
 def parse_kaikki_inflections(entry):
     """Extract inflected forms from kaikki entry."""
     forms = []
@@ -192,6 +230,8 @@ def parse_kaikki_inflections(entry):
 
         # Skip metadata entries
         if not form_text or form_text in ("no-table-tags",):
+            continue
+        if not is_usable_form(form_text):
             continue
         if "table-tags" in tags or "inflection-template" in tags:
             continue
@@ -374,6 +414,65 @@ def import_kaikki(conn, filepath):
 # Svobodne Slovniky import (English->Czech, we reverse it)
 # ---------------------------------------------------------------------------
 
+_NAME_ONLY_RE = re.compile(
+    r'^\s*(?:an?\s+)?(?:male\s+|female\s+|common\s+|masculine\s+|feminine\s+)?'
+    r'(?:surname|given\s+name|family\s+name|patronymic)\b',
+    re.IGNORECASE,
+)
+
+
+def is_name_only(entry_data):
+    """True when every sense of an entry is a bare 'a male surname' style gloss.
+
+    Wiktionary contributes ~9.9k of these. Giving them full MorfFlex paradigms
+    puts thousands of surname inflections into the index where they collide with
+    ordinary words, so they are excluded from the paradigm expansion.
+    """
+    senses = entry_data.get("senses", [])
+    if not senses:
+        return False
+    return all(_NAME_ONLY_RE.match((s.get("definition_en") or "").strip())
+               for s in senses)
+
+
+ALSO_EN_MAX = 12
+
+
+def _normalise_gloss(text):
+    return re.sub(r'[^a-z ]+', '', (text or "").lower()).strip()
+
+
+def merge_also_en(entry_json_text, glosses):
+    """Add Svobodné glosses to an existing entry's `also_en` list.
+
+    Returns the new entry_json string, or None when nothing was added. Skips a
+    gloss already covered by a sense, including by substring, so "a copy" is not
+    added next to "copy (the result of copying)".
+    """
+    try:
+        data = json.loads(entry_json_text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+    covered = {_normalise_gloss(s.get("definition_en"))
+               for s in data.get("senses", [])}
+    covered |= {_normalise_gloss(g) for g in data.get("also_en", [])}
+    covered.discard("")
+
+    fresh = []
+    for gloss in glosses:
+        norm = _normalise_gloss(gloss)
+        if not norm or any(norm in have or have in norm for have in covered):
+            continue
+        covered.add(norm)
+        fresh.append(gloss)
+    if not fresh:
+        return None
+
+    data["also_en"] = ((data.get("also_en") or []) + fresh)[:ALSO_EN_MAX]
+    return json.dumps(data, ensure_ascii=False)
+
+
 def parse_svobodne_pos(pos_field):
     """Parse Svobodne POS tag like 'n:', 'v:', 'adj:', 'n: pl.' etc."""
     pos_field = pos_field.strip()
@@ -451,6 +550,7 @@ def import_svobodne(conn, filepath):
 
     imported = 0
     skipped_existing = 0
+    merged_existing = 0
 
     for cs_word, translations in cs_entries.items():
         # Determine most common POS
@@ -462,11 +562,23 @@ def import_svobodne(conn, filepath):
             pos_counts.pop("unknown")
             primary_pos = max(pos_counts, key=pos_counts.get)
 
-        # Check if already exists from kaikki
-        c.execute("SELECT id FROM entries WHERE lemma = ? AND pos = ?",
+        # Already covered by Wiktionary. This used to `continue`, discarding
+        # ~40k translations for ~14.5k words the dictionary already had -- the
+        # very words a reader looks up most. Merge them instead, into a separate
+        # `also_en` list: Svobodné is a reversed English->Czech source, so its
+        # glosses are bare synonyms with no disambiguation and must not be
+        # promoted to numbered senses alongside curated Wiktionary definitions.
+        c.execute("SELECT id, entry_json FROM entries WHERE lemma = ? AND pos = ?",
                   (cs_word, primary_pos))
-        if c.fetchone():
+        existing = c.fetchone()
+        if existing:
             skipped_existing += 1
+            merged = merge_also_en(existing[1], [t["en"] for t in translations])
+            if merged:
+                c.execute("UPDATE entries SET entry_json = ?, "
+                          "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                          (merged, existing[0]))
+                merged_existing += 1
             continue
 
         # Build entry
@@ -505,7 +617,8 @@ def import_svobodne(conn, filepath):
 
     conn.commit()
     print(f"  Imported: {imported} entries (new Czech words not in Wiktionary)")
-    print(f"  Skipped (already in DB): {skipped_existing}")
+    print(f"  Already in DB: {skipped_existing} "
+          f"({merged_existing} gained extra glosses via also_en)")
     return imported
 
 
@@ -562,9 +675,20 @@ def import_morfflex(conn, filepath, target_lemmas=None):
     else:
         # Get all lemmas we have entries for
         print("  Loading existing lemmas from database...")
-        c.execute("SELECT DISTINCT lemma FROM entries")
-        known_lemmas = set(row[0] for row in c.fetchall())
-        print(f"  Known lemmas in DB: {len(known_lemmas)}")
+        c.execute("SELECT lemma, entry_json FROM entries")
+        by_lemma = defaultdict(list)
+        for lemma, entry_json in c.fetchall():
+            try:
+                by_lemma[lemma].append(json.loads(entry_json))
+            except (json.JSONDecodeError, TypeError):
+                by_lemma[lemma].append({})
+        # Surname-only lemmas are excluded: their paradigms otherwise occupy
+        # thousands of index keys that collide with ordinary Czech words.
+        known_lemmas = {lemma for lemma, variants in by_lemma.items()
+                        if not all(is_name_only(v) for v in variants)}
+        name_only = len(by_lemma) - len(known_lemmas)
+        print(f"  Known lemmas in DB: {len(known_lemmas)} "
+              f"({name_only} name-only lemmas excluded)")
 
     # Also build a set of lemmas already having wiktionary inflections
     c.execute("SELECT DISTINCT lemma FROM inflections WHERE source = 'wiktionary'")

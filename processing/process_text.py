@@ -57,7 +57,20 @@ Rules:
 4. Mark register accurately - most words are neutral, omit the field if neutral.
 5. Flag false friends with English if applicable.
 6. If unsure about any optional field, omit it rather than guessing.
-7. Output ONLY valid JSON, no markdown or commentary."""
+7. Output ONLY valid JSON, no markdown or commentary.
+8. Enumerate EVERY common sense, not just the most frequent one. A reader meets
+   the word in one specific sentence, so a single-sense entry sends them away
+   with a confidently wrong answer: "houbicka" shipped as "little mushroom" when
+   the text meant sponge, "dil" as "part" when it meant episode, "par" as "pair"
+   when it meant a few. Concrete/abstract splits, domain uses and colloquial
+   uses each get their own sense.
+9. Never return a definition that is only a list of bare English synonyms.
+   "drag, haul, lug" is not an entry - each sense needs enough gloss to tell it
+   apart from the others (domain, typical object, or a parenthetical).
+10. Reflexives: for a verb, say in "notes" whether the se/si form differs in
+   meaning from the bare verb ("ucit" = to teach but "ucit se" = to learn,
+   "vratit" = to give back but "vratit se" = to come back).
+11. Do not write surname or given-name glosses for ordinary words."""
 
 FEW_SHOT = [
     {
@@ -401,11 +414,160 @@ def validate_entry(entry, word):
     return len(issues) == 0, issues
 
 
-def save_entries(conn, results):
-    """Save generated entries to the database."""
+def _normalise_definition(text):
+    return re.sub(r'[^a-z ]+', '', (text or "").lower()).strip()
+
+
+_SENSE_STOPWORDS = frozenset(
+    "a an the to of or and in on for with by that which is are be as it its "
+    "something someone one from at not".split())
+
+
+def _sense_words(sense):
+    words = set(_normalise_definition(sense.get("definition_en")).split())
+    return words - _SENSE_STOPWORDS
+
+
+def _same_sense(a, b):
+    """Do two glosses describe the same meaning?
+
+    A regenerated entry restates senses in its own words ("faucet" ->
+    "tap, faucet"; "pair, couple" -> "a pair or couple (of two matching
+    things)"). Word-set containment alone misses the paraphrases, so fall back
+    to overlap: without this every re-audit leaves the entry full of
+    near-duplicate lines.
+    """
+    if not a or not b:
+        return False
+    if a <= b or b <= a:
+        return True
+    overlap = len(a & b)
+    return overlap >= 2 and overlap / min(len(a), len(b)) >= 0.5
+
+
+def merge_entry_senses(conn, lemma, pos, entry, replace=False):
+    """Fold a regenerated entry into the EXISTING (lemma, pos) row.
+
+    `INSERT OR IGNORE` against UNIQUE(lemma, pos) means nothing in this project
+    could ever improve an entry that already exists -- a word flagged by
+    tools/audit_entries.py would be regenerated and then silently discarded.
+
+    replace=False unions the new senses in and never drops an existing one.
+    replace=True treats the regenerated senses as authoritative, which is what a
+    re-audit needs: the worker is shown the existing definitions and asked to
+    keep what is right and fix what is not, so keeping the originals as well
+    both duplicates every sense and preserves the errors the audit found
+    ("tlacenka" glossed as haggis, "famozni" as famous). Examples, register and
+    entry-level metadata are carried over from the row being replaced.
+
+    Returns True when the row changed.
+    """
+    c = conn.cursor()
+    c.execute("SELECT id, entry_json FROM entries WHERE lemma = ? AND pos = ?",
+              (lemma, pos))
+    row = c.fetchone()
+    if not row:
+        return False
+    entry_id, existing_json = row
+    try:
+        existing = json.loads(existing_json)
+    except (json.JSONDecodeError, TypeError):
+        return False
+
+    old_senses = list(existing.get("senses") or [])
+    new_senses = [s for s in (entry.get("senses") or [])
+                  if (s.get("definition_en") or "").strip()]
+    changed = False
+
+    if replace and new_senses:
+        merged = []
+        for sense in new_senses:
+            words = _sense_words(sense)
+            match = next((o for o in old_senses if _same_sense(words, _sense_words(o))), None)
+            if match:
+                combined = dict(match)
+                combined.update(sense)
+                if match.get("examples") and not sense.get("examples"):
+                    combined["examples"] = match["examples"]
+                merged.append(combined)
+            else:
+                merged.append(sense)
+        if merged != old_senses:
+            old_senses = merged
+            changed = True
+    else:
+        for sense in new_senses:
+            words = _sense_words(sense)
+            subsumed = None
+            covered = False
+            for i, have in enumerate(old_senses):
+                have_words = _sense_words(have)
+                if not have_words:
+                    continue
+                if _same_sense(words, have_words):
+                    subsumed = i if len(have_words) < len(words) else None
+                    covered = subsumed is None
+                    break
+            if covered:
+                continue
+            if subsumed is None:
+                old_senses.append(sense)
+            else:
+                combined = dict(old_senses[subsumed])
+                combined.update(sense)
+                if old_senses[subsumed].get("examples") and not sense.get("examples"):
+                    combined["examples"] = old_senses[subsumed]["examples"]
+                old_senses[subsumed] = combined
+            changed = True
+
+    # Fill gaps in the old row, but never overwrite what it already asserts.
+    for field in ("gender", "aspect", "aspect_pair", "pronunciation",
+                  "notes", "frequency"):
+        if not existing.get(field) and entry.get(field):
+            existing[field] = entry[field]
+            changed = True
+
+    if not changed:
+        return False
+
+    existing["senses"] = old_senses
+    c.execute("UPDATE entries SET entry_json = ?, updated_at = CURRENT_TIMESTAMP "
+              "WHERE id = ?", (json.dumps(existing, ensure_ascii=False), entry_id))
+    return True
+
+
+def adopt_placeholder_pos(conn, lemma, pos):
+    """Retag a Svobodne `unknown`-POS row so a regenerated entry lands on it.
+
+    Svobodne stores ~28.8k rows with pos='unknown'. Without this, a regenerated
+    entry for the same word inserts a SECOND row under the real POS and the
+    reader sees both -- the corrected gloss next to the wrong one it replaced.
+    Returns True when a placeholder row was retagged to `pos`.
+    """
+    if pos in ("", "unknown"):
+        return False
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM entries WHERE lemma = ?", (lemma,))
+    if c.fetchone()[0] != 1:
+        return False
+    c.execute("SELECT id FROM entries WHERE lemma = ? AND pos = 'unknown'", (lemma,))
+    row = c.fetchone()
+    if not row:
+        return False
+    c.execute("UPDATE entries SET pos = ? WHERE id = ?", (pos, row[0]))
+    return True
+
+
+def save_entries(conn, results, refresh=False):
+    """Save generated entries to the database.
+
+    With refresh=True, an entry whose (lemma, pos) already exists is merged into
+    that row instead of being dropped.
+    """
     c = conn.cursor()
     saved = 0
     errors = 0
+    refreshed = 0
 
     for word, entry in results.items():
         if "_error" in entry or "_dry_run" in entry:
@@ -421,6 +583,9 @@ def save_entries(conn, results):
         confidence = 0.8 if valid else 0.5
 
         try:
+            # Must run BEFORE the insert -- see process_show_subs for why.
+            if refresh:
+                adopt_placeholder_pos(conn, lemma, pos)
             c.execute(
                 """INSERT OR IGNORE INTO entries
                    (lemma, pos, gender, aspect, aspect_pair, entry_json, source, confidence)
@@ -437,11 +602,15 @@ def save_entries(conn, results):
                         "INSERT INTO review_queue (entry_id, reason) VALUES (?, ?)",
                         (entry_id, "; ".join(issues))
                     )
+            elif refresh and merge_entry_senses(conn, lemma, pos, entry, replace=True):
+                refreshed += 1
         except Exception as e:
             print(f"  Error saving '{lemma}': {e}")
             errors += 1
 
     conn.commit()
+    if refresh:
+        print(f"  Merged into {refreshed} existing entries")
     return saved, errors
 
 

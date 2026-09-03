@@ -28,6 +28,11 @@ from pathlib import Path
 from collections import defaultdict
 
 from export_stardict import (
+    load_phrase_links,
+    is_usable_form,
+    junk_headwords,
+    is_name_only_entry,
+    format_name_entry_html,
     classify_entry_senses,
     resolve_crossref_entry,
     format_entry_html,
@@ -43,9 +48,9 @@ DEFAULT_DICT_NAME = "Czech-English"
 ENTRIES_PER_FILE = 10_000
 
 
-def format_definition_html(entry_json, lemma, pos):
+def format_definition_html(entry_json, lemma, pos, phrases=None):
     """Format a definition for Kindle display (reuses StarDict HTML formatter)."""
-    return format_entry_html(entry_json, lemma, pos)
+    return format_entry_html(entry_json, lemma, pos, phrases=phrases)
 
 
 def write_xhtml_file(filepath, entries_chunk, chunk_index):
@@ -171,13 +176,18 @@ def export_kindle(db_path=DB_PATH, output_dir=DEFAULT_OUTPUT_DIR, dict_name=DEFA
     print("Loading entries from database...")
     c.execute("SELECT lemma, pos, entry_json, source FROM entries ORDER BY lemma")
     entries = c.fetchall()
+
+    junk = junk_headwords((e["lemma"], e["source"]) for e in entries)
+    if junk:
+        entries = [e for e in entries if e["lemma"] not in junk]
+        print(f"  dropped {len(junk)} Svobodne pseudo-headwords")
     print(f"  {len(entries)} entries loaded")
 
     # Load inflections, grouped by lemma
     print("Loading inflections...")
     c.execute("SELECT form, lemma, pos FROM inflections")
-    inflections = c.fetchall()
-    print(f"  {len(inflections)} inflection mappings loaded")
+    inflections = [r for r in c.fetchall() if is_usable_form(r["form"])]
+    print(f"  {len(inflections)} inflection mappings loaded (table metadata dropped)")
 
     inflection_map = defaultdict(set)  # (lemma, pos) -> set of inflected forms
     for infl in inflections:
@@ -197,6 +207,9 @@ def export_kindle(db_path=DB_PATH, output_dir=DEFAULT_OUTPUT_DIR, dict_name=DEFA
         except json.JSONDecodeError:
             pass
 
+    print("Loading phrase back-links...")
+    phrase_links = load_phrase_links(conn, junk)
+
     # Resolve cross-references and build final entries
     kindle_entries = []  # (lemma, pos, definition_html, inflected_forms)
     resolved_count = 0
@@ -207,23 +220,31 @@ def export_kindle(db_path=DB_PATH, output_dir=DEFAULT_OUTPUT_DIR, dict_name=DEFA
         if not entry_data:
             continue
 
+        phrases = phrase_links.get(entry["lemma"].lower())
         real_senses, xref_senses = classify_entry_senses(entry_data)
 
-        if xref_senses and not real_senses:
+        if is_name_only_entry(entry_data):
+            # "a male surname" and nothing else -- collapse to a short tag so it
+            # cannot crowd out the real word it collides with.
+            definition_html = format_name_entry_html(entry_data, entry["lemma"])
+        elif xref_senses and not real_senses:
             # Pure cross-reference: resolve
-            resolved_html, _ = resolve_crossref_entry(entry_data, entries_by_lemma)
+            resolved_html, _ = resolve_crossref_entry(entry_data, entries_by_lemma, phrase_links)
             if resolved_html:
                 definition_html = resolved_html
                 resolved_count += 1
             else:
-                definition_html = format_definition_html(entry["entry_json"], entry["lemma"], entry["pos"])
+                definition_html = format_definition_html(
+                    entry["entry_json"], entry["lemma"], entry["pos"], phrases)
         elif xref_senses and real_senses:
             # Mixed: keep only real senses
             filtered = dict(entry_data)
             filtered["senses"] = real_senses
-            definition_html = format_definition_html(filtered, entry["lemma"], entry["pos"])
+            definition_html = format_definition_html(
+                filtered, entry["lemma"], entry["pos"], phrases)
         else:
-            definition_html = format_definition_html(entry["entry_json"], entry["lemma"], entry["pos"])
+            definition_html = format_definition_html(
+                entry["entry_json"], entry["lemma"], entry["pos"], phrases)
 
         # Get inflected forms for this entry
         forms = inflection_map.get(key, set())

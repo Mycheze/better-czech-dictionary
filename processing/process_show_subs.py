@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from process_text import (
     tokenize, lemmatize_with_majka, find_missing, pos_hint_to_pos,
-    validate_entry,
+    validate_entry, merge_entry_senses, adopt_placeholder_pos,
 )
 from yt_word_filter import structural_verdict, looks_like_proper_noun
 
@@ -188,22 +188,33 @@ def per_show_coverage(conn, show_freqs, lemma_map, pos_map):
     return rows
 
 
-def save_generated_entries(conn, entries, source):
-    """Validate and insert generated entries; queue imperfect ones for review."""
+def save_generated_entries(conn, entries, source, refresh=False):
+    """Validate and insert generated entries; queue imperfect ones for review.
+
+    With refresh=True an entry whose (lemma, pos) already exists is merged into
+    that row rather than dropped by INSERT OR IGNORE -- needed when re-auditing
+    thin entries flagged by tools/audit_entries.py.
+    """
     c = conn.cursor()
-    saved = errors = 0
+    saved = errors = refreshed = 0
     for word, entry in entries.items():
         if not isinstance(entry, dict) or "senses" not in entry:
             errors += 1
             continue
         valid, issues = validate_entry(entry, word)
         lemma = str(entry.get("lemma", word)).lower()
+        pos = entry.get("pos", "unknown")
         try:
+            # Must run BEFORE the insert: otherwise a regenerated "adjective"
+            # entry simply inserts alongside the Svobodne "unknown" row it was
+            # meant to correct, and the reader sees both.
+            if refresh:
+                adopt_placeholder_pos(conn, lemma, pos)
             c.execute(
                 """INSERT OR IGNORE INTO entries
                    (lemma, pos, gender, aspect, aspect_pair, entry_json, source, confidence)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (lemma, entry.get("pos", "unknown"), entry.get("gender"),
+                (lemma, pos, entry.get("gender"),
                  entry.get("aspect"), entry.get("aspect_pair"),
                  json.dumps(entry, ensure_ascii=False), source,
                  0.8 if valid else 0.5))
@@ -212,10 +223,14 @@ def save_generated_entries(conn, entries, source):
                 if not valid:
                     c.execute("INSERT INTO review_queue (entry_id, reason) VALUES (?, ?)",
                               (c.lastrowid, "; ".join(issues)))
+            elif refresh and merge_entry_senses(conn, lemma, pos, entry, replace=True):
+                refreshed += 1
         except Exception as e:
             print(f"  save error '{lemma}': {e}")
             errors += 1
     conn.commit()
+    if refresh:
+        print(f"  Merged into {refreshed} existing entries")
     return saved, errors
 
 
@@ -249,7 +264,8 @@ def link_forms(conn, form_to_lemma, source):
 
 def main():
     ap = argparse.ArgumentParser(description="Fold TV-show subtitles into the dictionary")
-    ap.add_argument("--dir", required=True, help="Directory of show subfolders")
+    ap.add_argument("--dir", help="Directory of show subfolders "
+                                  "(not needed when only importing entries)")
     ap.add_argument("--db", default=str(DB_PATH))
     ap.add_argument("--min-freq", type=int, default=1)
     ap.add_argument("--min-shows", type=int, default=1)
@@ -260,10 +276,26 @@ def main():
                     help="JSON of screening verdicts keyed by surface form")
     ap.add_argument("--import-entries", metavar="FILE",
                     help="JSON of generated entries keyed by headword")
+    ap.add_argument("--refresh", action="store_true",
+                    help="Merge new senses into existing (lemma, pos) rows "
+                         "instead of skipping them (for re-audit shards)")
     ap.add_argument("--source", default="claude",
                     help="`source` value for inserted rows (default: claude)")
     ap.add_argument("--per-show", action="store_true", help="Print per-show coverage")
     args = ap.parse_args()
+
+    # Re-audit shards (tools/audit_entries.py) carry entries for words that are
+    # already in the dictionary, so there is no corpus to scan -- just import.
+    if args.import_entries and not args.dir:
+        conn = sqlite3.connect(args.db)
+        entries = json.loads(Path(args.import_entries).read_text(encoding="utf-8"))
+        saved, errors = save_generated_entries(conn, entries, args.source, args.refresh)
+        print(f"Saved entries: {saved:,}   Errors: {errors}")
+        conn.close()
+        return
+
+    if not args.dir:
+        ap.error("--dir is required unless you pass only --import-entries")
 
     print(f"Reading subtitles from {args.dir} ...")
     show_corpus, files, dupes = build_corpus(args.dir)
@@ -344,7 +376,7 @@ def main():
 
     if args.import_entries:
         entries = json.loads(Path(args.import_entries).read_text(encoding="utf-8"))
-        saved, errors = save_generated_entries(conn, entries, args.source)
+        saved, errors = save_generated_entries(conn, entries, args.source, args.refresh)
         print(f"\nSaved entries: {saved:,}   Errors: {errors}")
 
         # Link every screened-real surface form to its headword.
